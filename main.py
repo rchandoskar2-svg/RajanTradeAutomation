@@ -30,3 +30,12 @@ def chartink_alert():
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT",10000)))
+    @app.get("/test-connection")
+def test_connection():
+    import requests, os
+    try:
+        url = os.getenv("WEBAPP_EXEC_URL")
+        r = requests.post(url, json={"action": "get_settings"}, timeout=25)
+        return r.text, 200, {"Content-Type": "application/json"}
+    except Exception as e:
+        return str(e), 500
