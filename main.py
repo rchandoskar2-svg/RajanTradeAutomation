@@ -1,4 +1,4 @@
-import os, time, json, requests
+import os, time, json, requests, re
 from flask import Flask, request, jsonify
 from threading import Thread
 
@@ -10,7 +10,7 @@ from threading import Thread
 app = Flask(__name__)
 
 # -------------------------
-# Environment (Render variables)
+# Environment Variables (Render Dashboard → Environment)
 # -------------------------
 WEBAPP_URL       = os.getenv("WEBAPP_URL")                 # Google Apps Script WebApp URL
 TOKEN            = os.getenv("TELEGRAM_TOKEN")             # Telegram BOT token
@@ -94,63 +94,64 @@ def health():
 
 
 # ================================================================
-# ⚡ Chartink Webhook Receiver (Phase 2 - Enhanced)
+# ⚡ Chartink Webhook Receiver (Phase 2 - Final Stable Version)
 # ================================================================
 @app.post("/chartink-alert")
 def chartink_alert():
-    # Token guard (optional)
+    # Token guard (for security)
     if CHARTINK_TOKEN:
         if request.args.get("token", "") != CHARTINK_TOKEN:
             return jsonify({"ok": False, "err": "unauthorized"}), 401
-            # --- RAW BODY DEBUG LOG ---
-    try:
-        raw_body = request.data.decode("utf-8", errors="ignore")
-        print("\n================ RAW CHARTINK BODY ================")
-        print(raw_body)
-        print("===================================================\n")
-        send_telegram("📩 Raw alert captured — check Render logs for details.")
-    except Exception as e:
-        print("Error reading raw body:", e)
 
-    payload = request.get_json(force=True, silent=True) or {}
+    # --- Read everything possible (JSON + RAW + HTML) ---
+    try:
+        payload = request.get_json(force=True, silent=True)
+    except:
+        payload = None
+
+    raw_body = request.get_data(as_text=True).strip()
+    content_type = request.headers.get("Content-Type", "")
+
+    print("\n================ RAW CHARTINK BODY ================")
+    print(f"Content-Type: {content_type}")
+    print(raw_body if raw_body else "(EMPTY BODY)")
+    print("===================================================\n")
+
+    send_telegram(f"📩 Alert received — content-type: {content_type}, size: {len(raw_body)}")
+
+    # Try to detect symbols
     symbols = []
 
-    # 1️⃣ Handle array-based formats
-    for key in ("stocks", "symbols"):
-        v = payload.get(key)
-        if isinstance(v, list):
-            symbols = [x.strip().upper() for x in v if str(x).strip()]
-            if symbols:
-                break
-
-    # 2️⃣ Handle string-based formats
-    if not symbols:
-        for key in ("stocks_str", "symbols_str", "text"):
+    # Case 1: JSON
+    if payload:
+        for key in ("stocks", "symbols"):
             v = payload.get(key)
-            if isinstance(v, str) and v.strip():
-                symbols = [x.strip().upper() for x in v.replace("\n", ",").split(",") if x.strip()]
-                if symbols:
+            if isinstance(v, list):
+                symbols = [x.strip().upper() for x in v if x.strip()]
+                break
+        if not symbols:
+            for key in ("stocks_str", "text"):
+                v = payload.get(key)
+                if isinstance(v, str):
+                    symbols = [x.strip().upper() for x in v.replace("\n", ",").split(",") if x.strip()]
                     break
 
-    # 3️⃣ Handle raw plain text fallback
-    if not symbols and isinstance(payload, str):
-        symbols = [x.strip().upper() for x in payload.split(",") if x.strip()]
-
-    # 4️⃣ Handle HTML/Email text fallback (if email-like body)
-    if not symbols and "body" in payload:
-        text = payload["body"]
-        if isinstance(text, str):
-            symbols = [x.strip().upper() for x in text.replace("\n", ",").split(",") if x.strip()]
+    # Case 2: HTML or plain text fallback
+    if not symbols and raw_body:
+        # extract uppercase words (2–15 letters) → typical stock symbols
+        candidates = re.findall(r"\b[A-Z]{2,15}\b", raw_body)
+        if candidates:
+            ignore = {"ALERT", "TRIGGERED", "SCAN", "ROCKET", "RAJAN", "BELOW", "NEW", "STOCKS", "FILTERED", "THROUGH"}
+            symbols = [s for s in candidates if s not in ignore]
 
     if not symbols:
         send_telegram("⚠️ Chartink alert received but no stock symbols found.")
         return jsonify({"ok": False, "err": "no symbols"}), 400
 
-    # ✅ Send Telegram update
+    # ✅ Success
     msg = f"📊 Chartink alert — {len(symbols)} symbols received:\n" + ", ".join(symbols[:10])
     send_telegram(msg)
 
-    # ✅ Send to Google WebApp
     post_to_webapp("chartink_import", {
         "symbols": symbols,
         "scanner": SCANNER_NAME,
