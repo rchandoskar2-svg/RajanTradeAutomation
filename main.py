@@ -1,122 +1,104 @@
-# main.py
-import os, json, time
+# ==========================
+# RajanTradeAutomation : Phase 2.2 (Final)
+# ==========================
+
+import os, json, time, requests
 from flask import Flask, request, jsonify
-import requests
 
 app = Flask(__name__)
 
-# ---- ENV (Render Dashboard मध्ये set करा) ----
-WEBAPP_EXEC_URL = os.getenv("WEBAPP_EXEC_URL")  # तुमचा Google Apps Script WebApp (exec) URL
+# --- Environment Variables (Render Dashboard मध्ये सेट केलेले) ---
+WEBAPP_EXEC_URL = os.getenv("WEBAPP_EXEC_URL")
+CHARTINK_TOKEN = os.getenv("CHARTINK_TOKEN", "")
 APP_NAME = "RajanTradeAutomation"
 
-# ---------- Helpers ----------
+# ==========================
+# Helper Functions
+# ==========================
+
 def gs_post(payload: dict):
-    """Call Google Apps Script WebApp with JSON."""
-    assert WEBAPP_EXEC_URL, "WEBAPP_EXEC_URL not configured"
-    r = requests.post(WEBAPP_EXEC_URL, json=payload, timeout=20)
+    """Call Google Apps Script WebApp (exec URL)"""
+    if not WEBAPP_EXEC_URL:
+        raise RuntimeError("WEBAPP_EXEC_URL not configured")
+    r = requests.post(WEBAPP_EXEC_URL, json=payload, timeout=25)
     r.raise_for_status()
-    return r.json()
+    try:
+        return r.json()
+    except Exception:
+        return {"ok": True}
 
 def get_settings():
-    """Fetch key-value settings from Google Sheet via WebApp."""
+    """Fetch key-value from Google Sheet"""
     res = gs_post({"action": "get_settings"})
-    # अपेक्षित: {"ok": True, "settings": {"LOW_WINDOW_START":"09:15", ...}}
     if not res.get("ok"):
-        raise RuntimeError(f"Settings fetch failed: {res}")
+        raise RuntimeError("Settings fetch failed: " + str(res))
     st = res["settings"]
-    # Normalize numeric
-    def as_int(k, default=0): return int(str(st.get(k, default)).strip())
-    def as_float(k, default=0.0): return float(str(st.get(k, default)).strip())
 
-    settings = {
-        "LOW_WINDOW_START": st.get("LOW_WINDOW_START", "09:15"),
-        "LOW_WINDOW_END":   st.get("LOW_WINDOW_END", "09:30"),
-        "TOTAL_BUY":        as_int("TOTAL_BUY", 15),
-        "ALERT1_MAX":       as_int("ALERT1_MAX", 7),
-        "ALERT2_MAX":       as_int("ALERT2_MAX", 8),
-        "CAPITAL":          as_float("CAPITAL", 500000),
-        "SORT_BY":          st.get("SORT_BY", "volume").lower(),  # "volume" | "%change"
+    def as_int(k, d=0): 
+        try: return int(str(st.get(k, d)).strip())
+        except: return d
+    def as_float(k, d=0.0): 
+        try: return float(str(st.get(k, d)).strip())
+        except: return d
+
+    return {
+        "TOTAL_BUY": as_int("TOTAL_BUY", 15),
+        "ALERT1_MAX": as_int("ALERT1_MAX", 7),
+        "ALERT2_MAX": as_int("ALERT2_MAX", 8),
+        "CAPITAL": as_float("CAPITAL", 500000),
+        "SORT_BY": (st.get("SORT_BY") or "volume").lower(),
     }
-    return settings
 
 def parse_chartink_payload(data):
-    """
-    Try to extract stocks with volume and optional %change + meta.
-    Accepts flexible Chartink webhook shapes.
-    Output: dict(alert_stage, scanner_name, scanner_url, items=[{symbol, volume, pchange}])
-    """
-    # 1) Alert stage
-    alert_stage = data.get("alert_stage") or data.get("stage") or data.get("ALERT_STAGE") or 1
-    try: alert_stage = int(alert_stage)
-    except: alert_stage = 1
+    """Parse Chartink webhook into usable dict"""
+    stage = data.get("alert_stage") or data.get("stage") or data.get("ALERT_STAGE") or 1
+    try: stage = int(stage)
+    except: stage = 1
+    if stage not in [1, 2]:
+        stage = 1
 
-    # 2) Scanner meta (if available)
-    scanner_name = data.get("scanner_name") or data.get("scan_name") or ""
-    scanner_url  = data.get("scanner_url") or data.get("scan_url") or ""
+    name = data.get("scanner_name") or data.get("scan_name") or "Rocket Rajan Scanner"
+    url = data.get("scanner_url") or data.get("scan_url") or "https://chartink.com/screener/rocket-rajan"
+    raw = data.get("stocks") or data.get("data") or []
 
-    # 3) Stock list (handle multiple possible keys)
-    raw = data.get("stocks") or data.get("data") or data.get("results") or []
     if isinstance(raw, str):
-        # "TCS,INFY,HDFCBANK" → split
         raw = [s.strip() for s in raw.split(",") if s.strip()]
 
     items = []
-    for row in raw:
-        if isinstance(row, str):
-            sym = row.strip().upper()
-            items.append({"symbol": sym, "volume": 0.0, "pchange": 0.0})
-        elif isinstance(row, dict):
-            sym = (row.get("symbol") or row.get("name") or row.get("nsecode") or "").upper()
-            vol = row.get("volume") or row.get("vol") or row.get("traded_qty") or 0
-            chg = row.get("pchange") or row.get("%change") or row.get("change_perc") or 0.0
-            try: vol = float(vol)
-            except: vol = 0.0
-            try: chg = float(chg)
-            except: chg = 0.0
+    for r in raw:
+        if isinstance(r, str):
+            items.append({"symbol": r.upper(), "volume": 0.0, "pchange": 0.0})
+        elif isinstance(r, dict):
+            sym = str(r.get("symbol") or r.get("name") or "").upper()
+            vol = float(r.get("volume") or r.get("vol") or r.get("traded_qty") or 0)
+            chg = float(r.get("pchange") or r.get("%change") or r.get("change") or 0)
             if sym:
                 items.append({"symbol": sym, "volume": vol, "pchange": chg})
+    return {"stage": stage, "scanner_name": name, "scanner_url": url, "items": items}
 
-    # dedupe by symbol (keep max volume)
-    seen = {}
-    for it in items:
-        s = it["symbol"]
-        if s not in seen or it["volume"] > seen[s]["volume"]:
-            seen[s] = it
-    items = list(seen.values())
+def rank_and_select(items, stg, sets):
+    """Apply ranking + filtering rules"""
+    total_buy = sets["TOTAL_BUY"]
+    a1max = sets["ALERT1_MAX"]
+    a2max = sets["ALERT2_MAX"]
+    sort_by = sets["SORT_BY"]
 
-    return {
-        "alert_stage": alert_stage,
-        "scanner_name": scanner_name,
-        "scanner_url": scanner_url,
-        "items": items,
-    }
-
-def rank_and_select(items, settings, alert_stage):
-    """Apply ranking by volume (or %change) and enforce caps."""
-    total_buy = settings["TOTAL_BUY"]
-    a1max     = settings["ALERT1_MAX"]
-    a2max     = settings["ALERT2_MAX"]
-    sort_by   = settings["SORT_BY"]  # "volume" | "%change"
-
-    # Decide phase cap
-    # Default: 50-50 split between stages; if TOTAL_BUY fits in A1, take all in A1 and skip A2.
-    if alert_stage == 1:
-        max_n = min(a1max, total_buy)
-        phase_cap_ratio = 1.0 if total_buy <= a1max else 0.5
+    # Decide cap & allocation ratio
+    if stg == 1:
+        maxn = min(a1max, total_buy)
+        ratio = 1.0 if total_buy <= a1max else 0.5
     else:
         if total_buy <= a1max:
             return {"skip": True, "reason": "TOTAL_BUY fulfilled in Alert1"}
-        remaining = max(total_buy - a1max, 0)
-        max_n = min(a2max, remaining)
-        phase_cap_ratio = 0.5
+        rem = max(total_buy - a1max, 0)
+        maxn = min(a2max, rem)
+        ratio = 0.5
 
-    # Rank
     key = (lambda x: x["volume"]) if sort_by == "volume" else (lambda x: x["pchange"])
     ranked = sorted(items, key=key, reverse=True)
 
-    # Select
-    if len(ranked) > max_n:
-        selected = ranked[:max_n]
+    if len(ranked) > maxn:
+        selected = ranked[:maxn]
         truncated = True
     else:
         selected = ranked
@@ -126,61 +108,65 @@ def rank_and_select(items, settings, alert_stage):
         "skip": False,
         "selected": selected,
         "truncated": truncated,
-        "max_n": max_n,
-        "phase_cap_ratio": phase_cap_ratio,
+        "maxn": maxn,
+        "ratio": ratio,
     }
 
-def rupees(n):  # simple money format
-    return f"₹{int(round(n, 0)):,}".replace(",", ",")
+# ==========================
+# ROUTES
+# ==========================
 
-# ---------- Routes ----------
 @app.get("/health")
 def health():
     return jsonify({"ok": True, "app": APP_NAME, "ts": int(time.time())})
 
-@app.post("/chartink-alert")
+@app.route("/chartink-alert", methods=["POST", "GET"])
 def chartink_alert():
     try:
-        data = request.get_json(force=True, silent=False) or {}
-        parsed = parse_chartink_payload(data)
-        alert_stage = parsed["alert_stage"]
+        # ---- Verify token ----
+        token = request.args.get("token")
+        if token and CHARTINK_TOKEN and token != CHARTINK_TOKEN:
+            return jsonify({"ok": False, "error": "Invalid token"}), 403
 
-        settings = get_settings()
-        sel = rank_and_select(parsed["items"], settings, alert_stage)
+        data = request.get_json(force=True, silent=True) or {}
+        parsed = parse_chartink_payload(data)
+        stage = parsed["stage"]
+
+        # ---- Fetch dynamic settings ----
+        sets = get_settings()
+        sel = rank_and_select(parsed["items"], stage, sets)
 
         if sel.get("skip"):
-            # Notify sheet/logs that stage-2 skipped (if needed)
             gs_post({
                 "action": "phase22_notify_skip",
                 "payload": {
-                    "alert_stage": alert_stage,
+                    "alert_stage": stage,
                     "reason": sel["reason"],
                     "scanner_name": parsed["scanner_name"],
-                    "scanner_url": parsed["scanner_url"],
+                    "scanner_url": parsed["scanner_url"]
                 }
             })
             return jsonify({"ok": True, "skipped": True, "reason": sel["reason"]})
 
         selected = sel["selected"]
         if not selected:
-            return jsonify({"ok": True, "selected": [], "note": "No symbols in alert"})
+            return jsonify({"ok": True, "note": "No symbols"}), 200
 
-        capital = settings["CAPITAL"]
-        phase_cap = capital * sel["phase_cap_ratio"]
+        capital = sets["CAPITAL"]
+        phase_cap = capital * sel["ratio"]
         per_stock_alloc = phase_cap / max(len(selected), 1)
 
-        # Prepare payload for WebApp/Sheets
         payload = {
-            "alert_stage": alert_stage,
+            "alert_stage": stage,
             "scanner_name": parsed["scanner_name"],
             "scanner_url": parsed["scanner_url"],
-            "total_buy": settings["TOTAL_BUY"],
-            "alert1_max": settings["ALERT1_MAX"],
-            "alert2_max": settings["ALERT2_MAX"],
+            "total_buy": sets["TOTAL_BUY"],
+            "alert1_max": sets["ALERT1_MAX"],
+            "alert2_max": sets["ALERT2_MAX"],
             "capital_total": capital,
             "phase_capital": phase_cap,
             "per_stock_alloc": per_stock_alloc,
-            "sort_by": settings["SORT_BY"],
+            "sort_by": sets["SORT_BY"],
             "selected": [
                 {
                     "rank": i+1,
@@ -191,21 +177,24 @@ def chartink_alert():
                 } for i, it in enumerate(selected)
             ],
             "truncated": sel["truncated"],
-            "max_n": sel["max_n"],
+            "max_n": sel["maxn"]
         }
 
-        # Update Google Sheets (StockList + Logs + Telegram summary)
-        res = gs_post({"action": "phase22_selection", "payload": payload})
-
-        return jsonify({"ok": True, "sheet": res, "selected_count": len(selected)})
+        # ---- Update Google Sheets ----
+        resp = gs_post({"action": "phase22_selection", "payload": payload})
+        return jsonify({"ok": True, "stage": stage, "count": len(selected), "sheet": resp}), 200
 
     except Exception as e:
-        # Send error to WebApp Logs + Telegram
         try:
             gs_post({"action": "phase22_error", "message": str(e)})
-        except:  # if even that fails, just return
+        except Exception:
             pass
         return jsonify({"ok": False, "error": str(e)}), 500
 
+
+# ==========================
+# Entry
+# ==========================
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
+    port = int(os.getenv("PORT", 10000))
+    app.run(host="0.0.0.0", port=port)
