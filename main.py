@@ -102,6 +102,15 @@ def chartink_alert():
     if CHARTINK_TOKEN:
         if request.args.get("token", "") != CHARTINK_TOKEN:
             return jsonify({"ok": False, "err": "unauthorized"}), 401
+            # --- RAW BODY DEBUG LOG ---
+    try:
+        raw_body = request.data.decode("utf-8", errors="ignore")
+        print("\n================ RAW CHARTINK BODY ================")
+        print(raw_body)
+        print("===================================================\n")
+        send_telegram("📩 Raw alert captured — check Render logs for details.")
+    except Exception as e:
+        print("Error reading raw body:", e)
 
     payload = request.get_json(force=True, silent=True) or {}
     symbols = []
