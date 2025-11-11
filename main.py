@@ -1,6 +1,6 @@
 # ===========================================================
-# 🚀 RajanTradeAutomation – Phase 2.3.3 (Final Stable + SmartCountSync Fix)
-# Author: Rajan Chandoskar & GPT-5 Assistant
+# 🚀 RajanTradeAutomation – Phase 2.3.4 (Final Stable + Response-based SmartCountSync)
+# Author : Rajan Chandoskar & GPT-5 Assistant
 # ===========================================================
 
 from flask import Flask, request, jsonify
@@ -20,7 +20,7 @@ INTERVAL_SECS    = int(os.getenv("INTERVAL_SECS", "1800"))
 TEST_TOKEN       = os.getenv("TEST_TOKEN", "TEST123")
 
 # ===========================================================
-# 🔹 Helper: Telegram sender
+# 🔹 Telegram sender
 # ===========================================================
 def send_telegram(text: str):
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
@@ -35,7 +35,7 @@ def send_telegram(text: str):
         print("Telegram error:", e)
 
 # ===========================================================
-# 🔹 Helper: Google WebApp call
+# 🔹 Helper: Call Google WebApp
 # ===========================================================
 def gs_post(payload: dict):
     if not WEBAPP_EXEC_URL:
@@ -47,7 +47,7 @@ def gs_post(payload: dict):
         return {"ok": False, "raw": r.text}
 
 # ===========================================================
-# 🔹 Health check
+# 🔹 Health Check
 # ===========================================================
 @app.get("/health")
 def health():
@@ -59,7 +59,7 @@ def health():
     })
 
 # ===========================================================
-# 🔹 Chartink Alert Receiver (SmartCountSync + Accurate Telegram)
+# 🔹 Chartink Alert Receiver (Accurate SmartCountSync)
 # ===========================================================
 @app.post("/chartink-alert")
 def chartink_alert():
@@ -88,7 +88,7 @@ def chartink_alert():
         else:
             detected = 0
 
-        # 🧩 Convert to lightweight CSV string for GAS
+        # 🧩 Convert stocks to lightweight CSV string
         if isinstance(stocks_field, list):
             flat = [s if isinstance(s, str) else s.get("symbol", "") for s in stocks_field]
             stocks_str = ",".join([s for s in flat if s])
@@ -111,11 +111,19 @@ def chartink_alert():
         }
 
         res = gs_post(payload)
+
+        # ✅ FIX: Read correct imported count from GAS response
         imported = 0
-        try:
-            imported = res.get("count", 0)
-        except Exception:
-            pass
+        if isinstance(res, dict):
+            if "count" in res:
+                imported = int(res["count"])
+            elif "msg" in res and "imported" in str(res["msg"]).lower():
+                try:
+                    # Extract last number before word "imported"
+                    parts = str(res["msg"]).split("imported")[0].split()
+                    imported = int([x for x in parts if x.isdigit()][-1])
+                except Exception:
+                    imported = 0
 
         diff = detected - imported
         msg = (
@@ -157,7 +165,7 @@ def test_telegram():
         return jsonify({"ok": False, "error": str(e)}), 500
 
 # ===========================================================
-# 🔹 Entry point
+# 🔹 Entry Point
 # ===========================================================
 if __name__ == "__main__":
     print("🚀 RajanTradeAutomation Render Service starting...")
