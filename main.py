@@ -1,27 +1,28 @@
 # ===========================================================
-# 🚀 RajanTradeAutomation – Phase 2.3.1 (SmartCountSync + Chunked Transfer)
+# 🚀 RajanTradeAutomation – Phase 2.3.3 (Final Stable + SmartCountSync Fix)
 # Author: Rajan Chandoskar & GPT-5 Assistant
 # ===========================================================
 
 from flask import Flask, request, jsonify
-import os, json, requests, time, traceback, math
+import os, json, requests, time, traceback
 
 app = Flask(__name__)
 APP_NAME = "RajanTradeAutomation"
 
 # ---------- Environment Variables ----------
-WEBAPP_EXEC_URL = os.getenv("WEBAPP_EXEC_URL")     # Google Apps Script WebApp URL
-CHARTINK_TOKEN  = os.getenv("CHARTINK_TOKEN", "RAJAN123")
-SCANNER_NAME    = os.getenv("SCANNER_NAME", "Rocket Rajan Scanner")
-SCANNER_URL     = os.getenv("SCANNER_URL", "")
-TELEGRAM_TOKEN  = os.getenv("TELEGRAM_TOKEN", "")
+WEBAPP_EXEC_URL  = os.getenv("WEBAPP_EXEC_URL")        # Google Apps Script WebApp URL
+CHARTINK_TOKEN   = os.getenv("CHARTINK_TOKEN", "RAJAN123")
+SCANNER_NAME     = os.getenv("SCANNER_NAME", "Rocket Rajan Scanner")
+SCANNER_URL      = os.getenv("SCANNER_URL", "")
+TELEGRAM_TOKEN   = os.getenv("TELEGRAM_TOKEN", "")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
-INTERVAL_SECS   = int(os.getenv("INTERVAL_SECS", "1800"))
-TEST_TOKEN      = os.getenv("TEST_TOKEN", "TEST123")
+INTERVAL_SECS    = int(os.getenv("INTERVAL_SECS", "1800"))
+TEST_TOKEN       = os.getenv("TEST_TOKEN", "TEST123")
 
-# ---------- Helper : Telegram Notify ----------
+# ===========================================================
+# 🔹 Helper: Telegram sender
+# ===========================================================
 def send_telegram(text: str):
-    """Send message to Telegram"""
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
         print("⚠️ Telegram not configured.")
         return
@@ -33,17 +34,21 @@ def send_telegram(text: str):
     except Exception as e:
         print("Telegram error:", e)
 
-# ---------- Helper : Call Google WebApp ----------
+# ===========================================================
+# 🔹 Helper: Google WebApp call
+# ===========================================================
 def gs_post(payload: dict):
     if not WEBAPP_EXEC_URL:
         raise Exception("WEBAPP_EXEC_URL not configured in environment")
-    r = requests.post(WEBAPP_EXEC_URL, json=payload, timeout=45)
+    r = requests.post(WEBAPP_EXEC_URL, json=payload, timeout=60)
     try:
         return r.json()
     except Exception:
         return {"ok": False, "raw": r.text}
 
-# ---------- Health Check ----------
+# ===========================================================
+# 🔹 Health check
+# ===========================================================
 @app.get("/health")
 def health():
     return jsonify({
@@ -53,13 +58,11 @@ def health():
         "mode": "LIVE" if "LIVE" in APP_NAME.upper() else "PAPER"
     })
 
-# ---------- Chartink Alert Receiver (Patched) ----------
+# ===========================================================
+# 🔹 Chartink Alert Receiver (SmartCountSync + Accurate Telegram)
+# ===========================================================
 @app.post("/chartink-alert")
 def chartink_alert():
-    """
-    Receives incoming alerts from Chartink,
-    validates token, and forwards in manageable chunks to Google WebApp.
-    """
     try:
         token = request.args.get("token")
         if CHARTINK_TOKEN and token and token != CHARTINK_TOKEN:
@@ -69,49 +72,61 @@ def chartink_alert():
         if not isinstance(data, dict):
             return jsonify({"ok": False, "error": "Invalid JSON payload"}), 400
 
-        # Enrich payload with scanner info
+        # --- Enrich payload with scanner info ---
         data["scanner_name"] = SCANNER_NAME
         data["scanner_url"]  = SCANNER_URL
 
-        stocks = data.get("stocks", [])
-        detected = len(stocks)
-        if detected == 0:
-            send_telegram("⚠️ Chartink alert received but no stocks found.")
-            return jsonify({"ok": False, "msg": "No stocks"})
+        # 🧠 Accurate detected count (works for list/dict/string)
+        stocks_field = data.get("stocks")
+        detected = 0
+        if isinstance(stocks_field, list):
+            detected = len(stocks_field)
+        elif isinstance(stocks_field, dict):
+            detected = len(stocks_field.keys())
+        elif isinstance(stocks_field, str):
+            detected = len([s for s in stocks_field.split(",") if s.strip()])
+        else:
+            detected = 0
 
-        # 🟢 Smart Chunked Transfer — 500 stocks per chunk
-        CHUNK = 500
-        total_imported = 0
-        chunks = math.ceil(detected / CHUNK)
+        # 🧩 Convert to lightweight CSV string for GAS
+        if isinstance(stocks_field, list):
+            flat = [s if isinstance(s, str) else s.get("symbol", "") for s in stocks_field]
+            stocks_str = ",".join([s for s in flat if s])
+        elif isinstance(stocks_field, dict):
+            stocks_str = ",".join(stocks_field.keys())
+        elif isinstance(stocks_field, str):
+            stocks_str = stocks_field
+        else:
+            stocks_str = ""
 
-        for i in range(0, detected, CHUNK):
-            batch = stocks[i:i + CHUNK]
-            payload = {
-                "action": "chartink_import",
-                "payload": {
-                    "stocks": batch,
-                    "detected_count": detected,
-                    "scanner_name": SCANNER_NAME,
-                    "scanner_url": SCANNER_URL
-                }
+        # --- Forward to Google WebApp ---
+        payload = {
+            "action": "chartink_import",
+            "payload": {
+                "stocks_str": stocks_str,
+                "detected_count": detected,
+                "scanner_name": SCANNER_NAME,
+                "scanner_url": SCANNER_URL
             }
-            try:
-                r = requests.post(WEBAPP_EXEC_URL, json=payload, timeout=45)
-                imported = 0
-                try:
-                    imported = r.json().get("count", 0)
-                except Exception:
-                    pass
-                total_imported += imported
-                time.sleep(1)  # safety delay between chunks
-            except Exception as e:
-                send_telegram(f"⚠️ Chunk error: {i//CHUNK+1}/{chunks} → {e}")
+        }
 
-        diff = detected - total_imported
-        msg = f"📊 SmartCountSync\nDetected: {detected}\nImported: {total_imported}\nDiff: {diff}"
+        res = gs_post(payload)
+        imported = 0
+        try:
+            imported = res.get("count", 0)
+        except Exception:
+            pass
+
+        diff = detected - imported
+        msg = (
+            f"📊 SmartCountSync\n"
+            f"Detected: {detected}\n"
+            f"Imported: {imported}\n"
+            f"Diff: {diff}"
+        )
         send_telegram(msg)
 
-        return jsonify({"ok": True, "detected": detected, "imported": total_imported, "diff": diff})
+        return jsonify({"ok": True, "detected": detected, "imported": imported, "diff": diff})
 
     except Exception as e:
         err = traceback.format_exc()
@@ -122,7 +137,9 @@ def chartink_alert():
             pass
         return jsonify({"ok": False, "error": str(e)}), 500
 
-# ---------- Manual test routes ----------
+# ===========================================================
+# 🔹 Manual test routes
+# ===========================================================
 @app.get("/test-connection")
 def test_connection():
     try:
@@ -139,7 +156,9 @@ def test_telegram():
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
 
-# ---------- Entry Point ----------
+# ===========================================================
+# 🔹 Entry point
+# ===========================================================
 if __name__ == "__main__":
     print("🚀 RajanTradeAutomation Render Service starting...")
     port = int(os.getenv("PORT", 10000))
