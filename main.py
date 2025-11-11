@@ -1,16 +1,16 @@
 # ===========================================================
-# 🚀 RajanTradeAutomation – Phase 2.2 (Stable Live/Paper Sync)
+# 🚀 RajanTradeAutomation – Phase 2.3.1 (SmartCountSync + Chunked Transfer)
 # Author: Rajan Chandoskar & GPT-5 Assistant
 # ===========================================================
 
 from flask import Flask, request, jsonify
-import os, json, requests, time, traceback
+import os, json, requests, time, traceback, math
 
 app = Flask(__name__)
 APP_NAME = "RajanTradeAutomation"
 
 # ---------- Environment Variables ----------
-WEBAPP_EXEC_URL = os.getenv("WEBAPP_EXEC_URL")  # Google Apps Script WebApp exec URL
+WEBAPP_EXEC_URL = os.getenv("WEBAPP_EXEC_URL")     # Google Apps Script WebApp URL
 CHARTINK_TOKEN  = os.getenv("CHARTINK_TOKEN", "RAJAN123")
 SCANNER_NAME    = os.getenv("SCANNER_NAME", "Rocket Rajan Scanner")
 SCANNER_URL     = os.getenv("SCANNER_URL", "")
@@ -27,8 +27,7 @@ def send_telegram(text: str):
         return
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-        payload = {"chat_id": TELEGRAM_CHAT_ID, "text": text}
-        r = requests.post(url, json=payload, timeout=10)
+        r = requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": text}, timeout=10)
         if r.status_code != 200:
             print("Telegram send failed:", r.text)
     except Exception as e:
@@ -36,20 +35,17 @@ def send_telegram(text: str):
 
 # ---------- Helper : Call Google WebApp ----------
 def gs_post(payload: dict):
-    """Post data to Google Apps Script"""
     if not WEBAPP_EXEC_URL:
         raise Exception("WEBAPP_EXEC_URL not configured in environment")
-    r = requests.post(WEBAPP_EXEC_URL, json=payload, timeout=30)
-    r.raise_for_status()
+    r = requests.post(WEBAPP_EXEC_URL, json=payload, timeout=45)
     try:
         return r.json()
-    except:
+    except Exception:
         return {"ok": False, "raw": r.text}
 
 # ---------- Health Check ----------
 @app.get("/health")
 def health():
-    """Basic health check"""
     return jsonify({
         "ok": True,
         "app": APP_NAME,
@@ -57,12 +53,12 @@ def health():
         "mode": "LIVE" if "LIVE" in APP_NAME.upper() else "PAPER"
     })
 
-# ---------- Chartink Alert Receiver ----------
+# ---------- Chartink Alert Receiver (Patched) ----------
 @app.post("/chartink-alert")
 def chartink_alert():
     """
-    Receives incoming alerts from Chartink.
-    Validates token and forwards to Google WebApp.
+    Receives incoming alerts from Chartink,
+    validates token, and forwards in manageable chunks to Google WebApp.
     """
     try:
         token = request.args.get("token")
@@ -77,44 +73,66 @@ def chartink_alert():
         data["scanner_name"] = SCANNER_NAME
         data["scanner_url"]  = SCANNER_URL
 
-        # Forward to Google WebApp
-        res = gs_post({"action": "chartink_import", "payload": data})
+        stocks = data.get("stocks", [])
+        detected = len(stocks)
+        if detected == 0:
+            send_telegram("⚠️ Chartink alert received but no stocks found.")
+            return jsonify({"ok": False, "msg": "No stocks"})
 
-        # NOTE: This is the earlier behavior (can miscount if payload isn’t normalized)
-        detected = 0
-        try:
-            detected = len(data.get("stocks", []))
-        except Exception:
-            detected = 0
+        # 🟢 Smart Chunked Transfer — 500 stocks per chunk
+        CHUNK = 500
+        total_imported = 0
+        chunks = math.ceil(detected / CHUNK)
 
-        send_telegram(f"📥 Chartink alert received — forwarded to WebApp.\n✅ {detected} stocks detected.")
-        return jsonify({"ok": True, "webapp_response": res})
-    
+        for i in range(0, detected, CHUNK):
+            batch = stocks[i:i + CHUNK]
+            payload = {
+                "action": "chartink_import",
+                "payload": {
+                    "stocks": batch,
+                    "detected_count": detected,
+                    "scanner_name": SCANNER_NAME,
+                    "scanner_url": SCANNER_URL
+                }
+            }
+            try:
+                r = requests.post(WEBAPP_EXEC_URL, json=payload, timeout=45)
+                imported = 0
+                try:
+                    imported = r.json().get("count", 0)
+                except Exception:
+                    pass
+                total_imported += imported
+                time.sleep(1)  # safety delay between chunks
+            except Exception as e:
+                send_telegram(f"⚠️ Chunk error: {i//CHUNK+1}/{chunks} → {e}")
+
+        diff = detected - total_imported
+        msg = f"📊 SmartCountSync\nDetected: {detected}\nImported: {total_imported}\nDiff: {diff}"
+        send_telegram(msg)
+
+        return jsonify({"ok": True, "detected": detected, "imported": total_imported, "diff": diff})
+
     except Exception as e:
         err = traceback.format_exc()
         send_telegram(f"❌ Render webhook error:\n{e}")
         try:
             gs_post({"action": "phase22_error", "payload": {"message": str(e)}})
-        except:
+        except Exception:
             pass
         return jsonify({"ok": False, "error": str(e)}), 500
 
-# ---------- Manual test route ----------
+# ---------- Manual test routes ----------
 @app.get("/test-connection")
 def test_connection():
-    """Test Render → WebApp connectivity"""
     try:
-        if not WEBAPP_EXEC_URL:
-            return "WEBAPP_EXEC_URL missing in environment", 500
         r = requests.post(WEBAPP_EXEC_URL, json={"action": "get_settings"}, timeout=25)
         return r.text, 200, {"Content-Type": "application/json"}
     except Exception as e:
         return traceback.format_exc(), 500
 
-# ---------- Test Telegram route ----------
 @app.get("/test-telegram")
 def test_telegram():
-    """Test Telegram connection"""
     try:
         send_telegram("✅ Telegram test successful — RajanTradeAutomation Render connected.")
         return jsonify({"ok": True, "msg": "Telegram sent"})
