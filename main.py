@@ -1,23 +1,23 @@
 # ===========================================================
-# RajanTradeAutomation – Phase 2.6 (Dual-Mode: SYNC + CSV)
-# Replace existing Main.py with this file (or replace chartink-alert route only)
+# RajanTradeAutomation – Main.py (Phase 2.6 CSV-safe, fallback to SYNC)
+# Replace your existing Main.py with this file in Render.
 # ===========================================================
 
 from flask import Flask, request, jsonify
-import os, json, requests, time, traceback
+import os, json, requests, time, traceback, csv, io
 
 app = Flask(__name__)
 APP_NAME = "RajanTradeAutomation"
 
 # ---------- Environment Variables ----------
-WEBAPP_EXEC_URL  = os.getenv("WEBAPP_EXEC_URL")        # Google Apps Script WebApp URL (keep as-is)
+WEBAPP_EXEC_URL  = os.getenv("WEBAPP_EXEC_URL")        # keep as-is
 CHARTINK_TOKEN   = os.getenv("CHARTINK_TOKEN", "RAJAN123")
 SCANNER_NAME     = os.getenv("SCANNER_NAME", "Rocket Rajan Scanner")
-SCANNER_URL      = os.getenv("SCANNER_URL", "")       # your Chartink screener page URL
+SCANNER_URL      = os.getenv("SCANNER_URL", "")
 TELEGRAM_TOKEN   = os.getenv("TELEGRAM_TOKEN", "")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
-MODE             = os.getenv("MODE", "SYNC").upper()  # "SYNC" or "CSV"
-CSV_TIMEOUT_SECS = int(os.getenv("CSV_TIMEOUT_SECS", "10"))  # timeout for CSV download
+MODE             = os.getenv("MODE", "SYNC").upper()   # CSV or SYNC
+CSV_TIMEOUT_SECS = int(os.getenv("CSV_TIMEOUT_SECS", "10"))
 USER_AGENT       = os.getenv("USER_AGENT", "Mozilla/5.0 (X11; Linux x86_64)")
 
 # ---------- Helpers ----------
@@ -27,9 +27,10 @@ def send_telegram(text: str):
         return
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-        r = requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": text}, timeout=10)
+        payload = {"chat_id": TELEGRAM_CHAT_ID, "text": text}
+        r = requests.post(url, json=payload, timeout=10)
         if r.status_code != 200:
-            print("Telegram send failed:", r.text)
+            print("Telegram send failed:", r.status_code, r.text)
     except Exception as e:
         print("Telegram error:", e)
 
@@ -47,22 +48,20 @@ def gs_post(payload: dict):
 def health():
     return jsonify({"ok": True, "app": APP_NAME, "mode": MODE, "ts": int(time.time())})
 
-# ---------- Utility: download Chartink CSV (timestamped) ----------
+# ---------- CSV download helper ----------
 def download_chartink_csv(scanner_url: str):
     """
-    Attempts to build CSV export URL from screener page and download it.
-    Returns CSV text on success, None on failure.
+    Try to construct Chartink export URL and download CSV.
+    Returns CSV text or None.
     """
     try:
         if not scanner_url:
             return None
-        # Chartink export path heuristic:
-        # if scanner_url ends with '/screener/<name>' => replace with '/screener/export/<name>'
-        if "/screener/" in scanner_url:
+        # Heuristic: replace /screener/ with /screener/export/ if present
+        if "/screener/" in scanner_url and "/screener/export/" not in scanner_url:
             csv_url = scanner_url.replace("/screener/", "/screener/export/")
         else:
             csv_url = scanner_url
-        # Add timestamp to bust caches
         csv_url = f"{csv_url}?ts={int(time.time())}"
         headers = {"User-Agent": USER_AGENT}
         r = requests.get(csv_url, headers=headers, timeout=CSV_TIMEOUT_SECS)
@@ -75,45 +74,68 @@ def download_chartink_csv(scanner_url: str):
         print("CSV download exception:", e)
         return None
 
-# ---------- Utility: parse CSV text into list of {symbol, maybe volume} ----------
-def parse_csv_to_stocks(csv_text: str):
+# ---------- CSV parse helper ----------
+def parse_csv_text(csv_text: str):
     """
-    Expects first row header with columns including Symbol and maybe Volume.
-    Returns list of dicts: [{"symbol":"ABC","volume":12345}, ...]
+    Parse CSV text into list of dicts with at least 'symbol' key.
+    Try to find columns: symbol/ticker/code and volume.
     """
     try:
-        lines = [l for l in csv_text.splitlines() if l.strip()]
-        if not lines:
+        f = io.StringIO(csv_text)
+        reader = csv.reader(f)
+        rows = list(reader)
+        if not rows:
             return []
-        # naive CSV split (sufficient for Chartink CSV which is comma-separated)
-        header = [h.strip().lower() for h in lines[0].split(",")]
+        header = [h.strip().lower() for h in rows[0]]
+        # Find indices
         symbol_idx = None
         vol_idx = None
+        # common symbol header names
         for i, col in enumerate(header):
             if col in ("symbol", "ticker", "code"):
                 symbol_idx = i
             if "volume" in col:
                 vol_idx = i
+        # fallback: look for "symbol" substring
+        if symbol_idx is None:
+            for i, col in enumerate(header):
+                if "symbol" in col or "ticker" in col or "code" in col:
+                    symbol_idx = i
+                    break
         stocks = []
-        for row in lines[1:]:
-            cols = [c.strip() for c in row.split(",")]
-            if symbol_idx is not None and symbol_idx < len(cols):
-                sym = cols[symbol_idx].replace('"', '').strip()
-                if not sym:
-                    continue
-                vol = None
-                if vol_idx is not None and vol_idx < len(cols):
-                    try:
-                        vol = int(cols[vol_idx].replace(",", "").replace('"', "").strip())
-                    except:
-                        vol = None
+        for row in rows[1:]:
+            if not row:
+                continue
+            sym = None
+            vol = None
+            if symbol_idx is not None and symbol_idx < len(row):
+                sym = row[symbol_idx].strip().replace('"','')
+            else:
+                # try first non-empty column
+                for c in row:
+                    if c.strip():
+                        sym = c.strip().replace('"','')
+                        break
+            if vol_idx is not None and vol_idx < len(row):
+                try:
+                    vol = int(row[vol_idx].replace(",","").replace('"','').strip())
+                except:
+                    vol = None
+            # normalize symbol (if contains space or full name, try to extract ticker like last token)
+            if sym:
+                # If symbol contains spaces and uppercase token at end, try that
+                parts = sym.split()
+                if len(parts) > 1:
+                    last = parts[-1]
+                    if last.isupper() and len(last) <= 10:
+                        sym = last
                 stocks.append({"symbol": sym, "volume": vol})
         return stocks
     except Exception as e:
-        print("CSV parse error:", e)
+        print("CSV parse exception:", e)
         return []
 
-# ---------- Chartink Alert Receiver (Dual Mode) ----------
+# ---------- Chartink Alert Receiver (Dual-mode safe) ----------
 @app.post("/chartink-alert")
 def chartink_alert():
     try:
@@ -129,79 +151,85 @@ def chartink_alert():
         data["scanner_name"] = SCANNER_NAME
         data["scanner_url"]  = SCANNER_URL
 
-        # detect count robustly (list/dict/string)
-        stocks_field = data.get("stocks")
-        detected = 0
-        if isinstance(stocks_field, list):
-            detected = len(stocks_field)
-        elif isinstance(stocks_field, dict):
-            detected = len(stocks_field.keys())
-        elif isinstance(stocks_field, str):
-            detected = len([s for s in stocks_field.split(",") if s.strip()])
-        else:
-            detected = 0
+        # robust detected count from incoming payload
+        def detect_count_from_payload(d):
+            try:
+                s = d.get("stocks")
+                if isinstance(s, list): return len(s)
+                if isinstance(s, dict): return len(s.keys())
+                if isinstance(s, str): return len([x for x in s.split(",") if x.strip()])
+            except:
+                pass
+            return 0
 
-        # MODE handling
+        incoming_detected = detect_count_from_payload(data)
+
+        # MODE handling: try CSV if requested
         if MODE == "CSV":
-            # Try CSV path first
             csv_text = download_chartink_csv(SCANNER_URL)
             if csv_text:
-                parsed = parse_csv_to_stocks(csv_text)
+                parsed = parse_csv_text(csv_text)
                 if parsed:
-                    # Forward parsed (with volume) to GAS as structured payload
-                    payload = {"action": "chartink_import", "payload": {"stocks": parsed, "detected_count": detected, "scanner_name": SCANNER_NAME, "scanner_url": SCANNER_URL}}
+                    # forward parsed payload to GAS
+                    payload = {
+                        "action": "chartink_import",
+                        "payload": {
+                            "stocks": parsed,
+                            "detected_count": incoming_detected or len(parsed),
+                            "scanner_name": SCANNER_NAME,
+                            "scanner_url": SCANNER_URL,
+                            "source": "csv"
+                        }
+                    }
                     res = gs_post(payload)
-                    imported = res.get("count", 0) if isinstance(res, dict) else 0
-                    # if GAS didn't return count, fallback to parsing message text
-                    if imported == 0 and isinstance(res, dict) and "msg" in res:
-                        try:
-                            if "imported" in str(res["msg"]).lower():
-                                parts = str(res["msg"]).split("imported")[0].split()
-                                imported = int([x for x in parts if x.isdigit()][-1])
-                        except:
-                            imported = 0
-                    diff = detected - imported
-                    send_telegram(f"📊 SmartCountSync (CSV)\nDetected: {detected}\nImported: {imported}\nDiff: {diff}")
-                    return jsonify({"ok": True, "mode": "CSV", "detected": detected, "imported": imported, "diff": diff})
+                    # Try to determine imported count returned by GAS
+                    imported = 0
+                    try:
+                        if isinstance(res, dict) and "count" in res:
+                            imported = int(res.get("count", 0))
+                    except:
+                        imported = 0
+                    # If GAS didn't return count, fallback to parsed length
+                    if imported == 0:
+                        imported = len(parsed)
+                    diff = (incoming_detected or len(parsed)) - imported
+                    send_telegram(f"📊 SmartCountSync (CSV)\nDetected: {incoming_detected or len(parsed)}\nImported: {imported}\nDiff: {diff}")
+                    return jsonify({"ok": True, "mode": "CSV", "detected": incoming_detected or len(parsed), "imported": imported})
                 else:
-                    print("CSV parsed 0 stocks; falling back to SYNC")
+                    print("CSV parsed 0 stocks; will fallback to SYNC")
             else:
-                print("CSV download failed or empty; falling back to SYNC")
+                print("CSV download failed; will fallback to SYNC")
 
-        # SYNC fallback (or default)
-        # forward original data to GAS (existing stable flow)
+        # SYNC fallback (or MODE == SYNC)
         res = gs_post({"action": "chartink_import", "payload": data})
-        # compute imported from response robustly
         imported = 0
-        if isinstance(res, dict):
-            if "count" in res:
-                try:
-                    imported = int(res.get("count", 0))
-                except:
-                    imported = 0
-            elif "msg" in res and "imported" in str(res["msg"]).lower():
-                try:
-                    parts = str(res["msg"]).split("imported")[0].split()
-                    imported = int([x for x in parts if x.isdigit()][-1])
-                except:
-                    imported = 0
+        try:
+            if isinstance(res, dict) and "count" in res:
+                imported = int(res.get("count", 0))
+            elif isinstance(res, dict) and "ok" in res and "raw" in res:
+                # sometimes raw text contains msg; ignore
+                imported = 0
+        except:
+            imported = 0
 
-        send_telegram(f"📥 Chartink alert received — forwarded to WebApp.\n✅ {detected} stocks detected.\nImported: {imported}")
-        return jsonify({"ok": True, "mode": "SYNC", "detected": detected, "imported": imported})
+        send_telegram(f"📥 Chartink alert received — forwarded to WebApp.\n✅ {incoming_detected} stocks detected.\nImported: {imported}")
+        return jsonify({"ok": True, "mode": "SYNC", "detected": incoming_detected, "imported": imported})
 
     except Exception as e:
         err = traceback.format_exc()
-        send_telegram(f"❌ Render webhook error:\n{e}")
+        send_telegram(f"❌ Render webhook error:\n{str(e)[:300]}")
         try:
             gs_post({"action": "phase22_error", "payload": {"message": str(e)}})
-        except Exception:
+        except:
             pass
         return jsonify({"ok": False, "error": str(e)}), 500
 
-# ---------- Manual test routes ----------
+# ---------- Manual test route ----------
 @app.get("/test-connection")
 def test_connection():
     try:
+        if not WEBAPP_EXEC_URL:
+            return "WEBAPP_EXEC_URL missing in environment", 500
         r = requests.post(WEBAPP_EXEC_URL, json={"action": "get_settings"}, timeout=25)
         return r.text, 200, {"Content-Type": "application/json"}
     except Exception as e:
@@ -215,7 +243,7 @@ def test_telegram():
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
 
-# ---------- Entry point ----------
+# ---------- Entry Point ----------
 if __name__ == "__main__":
     print("🚀 RajanTradeAutomation Render Service starting... MODE=", MODE)
     port = int(os.getenv("PORT", 10000))
