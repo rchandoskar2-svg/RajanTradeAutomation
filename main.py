@@ -1,309 +1,209 @@
-# main.py
-# RajanTradeAutomation - Render webhook + FYERS integration (symbolUpdate-capable)
-# Replace your existing main.py with this file. This preserves your Chartink -> WebApp flow,
-# and only adds FYERS for live ticks & volume.
+# ============================================================
+#  RajanTradeAutomation - FINAL STABLE main.py
+#  Fyers Auth (using api-t1) + Live Data + Chartink Webhook
+# ============================================================
 
 from flask import Flask, request, jsonify
-import os, requests, time, traceback, json, threading, queue
+import os, requests, time, traceback, json
 
 app = Flask(__name__)
 
-# ------------------- Existing env vars -------------------
-WEBAPP_EXEC_URL = os.getenv("WEBAPP_EXEC_URL")  # Google Apps Script exec URL
+# ------------------- ENV -------------------
+WEBAPP_EXEC_URL = os.getenv("WEBAPP_EXEC_URL")
+
 CHARTINK_TOKEN  = os.getenv("CHARTINK_TOKEN", "RAJAN123")
 TELEGRAM_TOKEN  = os.getenv("TELEGRAM_TOKEN", "")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
-INTERVAL_SECS   = int(os.getenv("INTERVAL_SECS", "1800"))
-TEST_TOKEN      = os.getenv("TEST_TOKEN", "TEST123")
-USER_AGENT = os.getenv("USER_AGENT", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
+USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
 
-# ------------------- FYERS env vars -------------------
-FYERS_CLIENT_ID = os.getenv("FYERS_CLIENT_ID")
-FYERS_SECRET_KEY = os.getenv("FYERS_SECRET_KEY")
-FYERS_REDIRECT_URI = os.getenv("FYERS_REDIRECT_URI")
-FYERS_TOKEN_FILE = os.getenv("FYERS_TOKEN_FILE", "fyers_token.json")
+# FYERS
+FYERS_CLIENT_ID = os.getenv("FYERS_CLIENT_ID", "")
+FYERS_SECRET_KEY = os.getenv("FYERS_SECRET_KEY", "")
+FYERS_REDIRECT_URI = os.getenv("FYERS_REDIRECT_URI", "")
+FYERS_ACCESS_TOKEN = os.getenv("FYERS_ACCESS_TOKEN", "")
 
-# ------------------- FYERS tuning -------------------
-FYERS_WS_URL_TEMPLATE = "wss://api.fyers.in/socket/v2/dataSock?access_token={token}"
-FYERS_SUB_BATCH = int(os.getenv("FYERS_SUB_BATCH", "25"))
-FYERS_RECONNECT_BACKOFF = int(os.getenv("FYERS_RECONNECT_BACKOFF", "3"))
+TOKEN_FILE = "fyers_token.json"
 
-# ------------------- imports -------------------
-try:
-    from fyers_apiv3 import fyersModel
-except:
-    fyersModel = None
 
-try:
-    import websocket
-except:
-    websocket = None
-
-# ------------------- Telegram helper -------------------
-def send_telegram(text: str):
+# ------------------- TELEGRAM -------------------
+def send_telegram(msg):
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
+        print("Telegram missing")
         return
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-        requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": text})
+        requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": msg}, timeout=10)
     except:
         pass
 
-# ------------------- Google Script POST helper -------------------
-def gs_post(payload: dict):
-    if not WEBAPP_EXEC_URL:
-        raise Exception("WEBAPP_EXEC_URL not configured")
-    r = requests.post(WEBAPP_EXEC_URL, json=payload)
+
+# ------------------- GAS POST -------------------
+def gs_post(payload):
+    r = requests.post(WEBAPP_EXEC_URL, json=payload, timeout=20)
     try:
         return r.json()
     except:
         return {"ok": False, "raw": r.text}
 
-# ------------------- Existing NSE/Yahoo quote engines -------------------
-def fetch_nse_quote(symbol):
-    try:
-        headers = {
-            "User-Agent": USER_AGENT,
-            "Accept": "application/json",
-            "Referer": "https://www.nseindia.com/"
-        }
-        url = f"https://www.nseindia.com/api/quote-equity?symbol={symbol}"
-        s = requests.Session()
-        s.headers.update(headers)
-        _ = s.get("https://www.nseindia.com")
-        r = s.get(url)
-        if r.status_code == 200:
-            j = r.json()
-            p = j["priceInfo"]
-            return {
-                "price": p.get("lastPrice"),
-                "changePercent": p.get("pChange"),
-                "volume": p.get("totalTradedVolume")
-            }
-    except:
-        pass
-    return None
 
-def fetch_yahoo_quote(symbol):
+# ------------------- SAVE FYERS TOKEN -------------------
+def save_access_token(token):
     try:
-        url = f"https://query1.finance.yahoo.com/v7/finance/quote?symbols={symbol}.NS"
-        r = requests.get(url, headers={"User-Agent": USER_AGENT})
-        q = r.json()["quoteResponse"]["result"]
-        if q:
-            rec = q[0]
-            return {
-                "price": rec.get("regularMarketPrice"),
-                "changePercent": rec.get("regularMarketChangePercent"),
-                "volume": rec.get("regularMarketVolume")
-            }
-    except:
-        pass
-    return None
-
-# ------------------- FYERS token persistence -------------------
-def save_fyers_tokens(data):
-    try:
-        with open(FYERS_TOKEN_FILE, "w") as f:
-            json.dump(data, f)
-        os.environ["FYERS_ACCESS_TOKEN"] = data.get("access_token","")
+        with open(TOKEN_FILE, "w") as f:
+            json.dump({"access_token": token}, f)
+        os.environ["FYERS_ACCESS_TOKEN"] = token
         return True
     except:
         return False
 
-def load_fyers_tokens():
-    try:
-        if os.path.exists(FYERS_TOKEN_FILE):
-            return json.load(open(FYERS_TOKEN_FILE))
-    except:
-        pass
-    return {}
 
-# ------------------- In-memory FYERS tick store -------------------
-fyers_ticks = {}
-fyers_ticks_lock = threading.Lock()
-subscription_queue = queue.Queue()
+# ------------------- LOAD FYERS TOKEN -------------------
+def load_access_token():
+    if os.path.exists(TOKEN_FILE):
+        with open(TOKEN_FILE) as f:
+            return json.load(f).get("access_token")
+    return ""
 
-ws_app_instance = {"obj": None, "lock": threading.Lock()}
-ws_thread = {"obj": None, "running": False}
 
-# ------------------- Utility -------------------
-def to_fyers_instrument(sym):
-    s = sym.strip().upper()
-    if ":" in s:
-        return s
-    return f"NSE:{s}-EQ"
-
-# ------------------- FYERS WebSocket handlers -------------------
-def on_fyers_open(ws):
-    print("FYERS WS opened")
-    batch = []
-    while not subscription_queue.empty():
-        batch.append(subscription_queue.get())
-        if len(batch) >= FYERS_SUB_BATCH:
-            ws.send(json.dumps({"type": "subscribe","payload":{"symbols": batch}}))
-            print("Subscribed batch:", batch)
-            batch = []
-    if batch:
-        ws.send(json.dumps({"type": "subscribe","payload":{"symbols": batch}}))
-        print("Subscribed final batch:", batch)
-
-def on_fyers_message(ws, message):
-    try:
-        data = json.loads(message)
-    except:
-        print("Raw:", message)
-        return
-    with fyers_ticks_lock:
-        if "d" in data:
-            for entry in data["d"]:
-                sym = entry.get("s")
-                if sym:
-                    fyers_ticks[sym] = entry
-
-def on_fyers_close(ws, code, reason):
-    print("FYERS WS closed")
-    ws_thread["running"] = False
-    time.sleep(FYERS_RECONNECT_BACKOFF)
-    start_fyers_ws_background()
-
-def on_fyers_error(ws, err):
-    print("FYERS WS error:", err)
-
-# ------------------- Start WS -------------------
-def start_fyers_ws_background():
-    if ws_thread["running"]:
-        return
-    tokens = load_fyers_tokens()
-    access_token = tokens.get("access_token")
-    if not access_token:
-        print("No FYERS token")
-        return
-    ws_url = FYERS_WS_URL_TEMPLATE.format(token=access_token)
-
-    def run():
-        ws_thread["running"] = True
-        while ws_thread["running"]:
-            try:
-                ws = websocket.WebSocketApp(
-                    ws_url,
-                    on_open=on_fyers_open,
-                    on_message=on_fyers_message,
-                    on_close=on_fyers_close,
-                    on_error=on_fyers_error
-                )
-                ws_app_instance["obj"] = ws
-                ws.run_forever()
-            except:
-                pass
-            time.sleep(FYERS_RECONNECT_BACKOFF)
-
-    t = threading.Thread(target=run, daemon=True)
-    t.start()
-    ws_thread["obj"] = t
-    print("WS thread started")
-
-# ------------------- Subscribe helper -------------------
-def queue_subscribe_symbols(symbols):
-    for s in symbols:
-        subscription_queue.put(to_fyers_instrument(s))
-
-# ------------------- FYERS quote reader -------------------
-def fetch_fyers_quote(symbol):
-    key = to_fyers_instrument(symbol)
-    with fyers_ticks_lock:
-        if key in fyers_ticks:
-            e = fyers_ticks[key]
-            return {
-                "price": e.get("ltp"),
-                "changePercent": e.get("ch"),
-                "volume": e.get("vol")
-            }
-    return None
-
-# ------------------- get_quote -------------------
-def get_quote(symbol):
-    out = fetch_fyers_quote(symbol)
-    if out and out["price"]:
-        return out
-    out = fetch_nse_quote(symbol)
-    if out and out["price"]:
-        return out
-    out = fetch_yahoo_quote(symbol)
-    return out or {"price": None, "changePercent": None, "volume": None}
-
-# ------------------- FYERS Auth -------------------
+# ------------------- FYERS AUTH URL -------------------
 @app.get("/fyers-auth")
 def fyers_auth():
-    if not (FYERS_CLIENT_ID and FYERS_SECRET_KEY and FYERS_REDIRECT_URI):
-        return jsonify({"ok":False,"error":"Missing config"})
-    state = "rajan_state"
     try:
-        session = fyersModel.SessionModel(
-            client_id=FYERS_CLIENT_ID,
-            secret_key=FYERS_SECRET_KEY,
-            redirect_uri=FYERS_REDIRECT_URI,
-            response_type="code",
-            state=state
-        )
-        auth_url = session.generate_authcode()
-    except:
-        # NEW FIXED URL
-        import urllib.parse
+        if not FYERS_CLIENT_ID or not FYERS_SECRET_KEY or not FYERS_REDIRECT_URI:
+            return jsonify({"ok": False, "error": "Env missing"}), 400
+
+        state = "rajan_state"
+
+        # FINAL WORKING URL → YOU CONFIRMED
         auth_url = (
             "https://api-t1.fyers.in/api/v3/generate-authcode?"
-            f"client_id={FYERS_CLIENT_ID}&redirect_uri={urllib.parse.quote(FYERS_REDIRECT_URI)}"
-            f"&response_type=code&state={state}"
+            f"client_id={FYERS_CLIENT_ID}&"
+            f"redirect_uri={requests.utils.quote(FYERS_REDIRECT_URI)}&"
+            f"response_type=code&state={state}"
         )
-    return jsonify({"ok":True,"auth_url":auth_url})
 
+        return jsonify({"ok": True, "auth_url": auth_url})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+# ------------------- FYERS REDIRECT -------------------
 @app.get("/fyers-redirect")
 def fyers_redirect():
     try:
-        auth_code = request.args.get("code")
-        if not auth_code:
+        code = request.args.get("auth_code") or request.args.get("code")
+        if not code:
             return "Missing code", 400
 
-        session = fyersModel.SessionModel(
-            client_id=FYERS_CLIENT_ID,
-            secret_key=FYERS_SECRET_KEY,
-            redirect_uri=FYERS_REDIRECT_URI,
-            response_type="code",
-            grant_type="authorization_code"
-        )
-        session.set_token(auth_code)
-        token_response = session.generate_token()
-        save_fyers_tokens(token_response)
-        start_fyers_ws_background()
-        send_telegram("FYERS token saved. WS starting.")
-        return "Auth successful — token saved and WS starting."
-    except Exception as e:
-        send_telegram(f"FYERS redirect error: {e}")
-        return str(e), 500
+        # Exchange auth_code → access_token
+        url = "https://api.fyers.in/api/v3/validate-authcode"
+        payload = {
+            "grant_type": "authorization_code",
+            "appId": FYERS_CLIENT_ID,
+            "appSecret": FYERS_SECRET_KEY,
+            "auth_code": code
+        }
 
-# ------------------- Chartink webhook -------------------
+        r = requests.post(url, json=payload, timeout=15).json()
+
+        if "access_token" not in r:
+            send_telegram(f"❌ FYERS Token Error:\n{r}")
+            return f"Token error: {r}", 500
+
+        access_token = r["access_token"]
+        save_access_token(access_token)
+
+        send_telegram("✅ FYERS Access Token saved successfully.")
+        return "Authentication Success. Token Saved.", 200
+
+    except Exception as e:
+        return f"Error: {e}", 500
+
+
+# ------------------- GET QUOTE (NSE → Yahoo fallback) -------------------
+def fetch_nse(symbol):
+    try:
+        headers = {
+            "User-Agent": USER_AGENT,
+            "Accept": "application/json",
+        }
+        s = requests.Session()
+        s.headers.update(headers)
+        _ = s.get("https://www.nseindia.com", timeout=10)
+        url = f"https://www.nseindia.com/api/quote-equity?symbol={symbol}"
+        r = s.get(url, timeout=10)
+        if r.status_code == 200:
+            j = r.json()
+            p = j.get("priceInfo", {})
+            return {
+                "price": p.get("lastPrice"),
+                "changePercent": p.get("pChange"),
+                "volume": p.get("totalTradedVolume"),
+                "low": p.get("intraDayLow"),
+                "high": p.get("intraDayHigh")
+            }
+    except:
+        pass
+    return None
+
+
+def fetch_yahoo(symbol):
+    try:
+        q = symbol + ".NS"
+        url = f"https://query1.finance.yahoo.com/v7/finance/quote?symbols={q}"
+        r = requests.get(url, timeout=10)
+        j = r.json().get("quoteResponse", {}).get("result", [])
+        if j:
+            rec = j[0]
+            return {
+                "price": rec.get("regularMarketPrice"),
+                "changePercent": rec.get("regularMarketChangePercent"),
+                "volume": rec.get("regularMarketVolume"),
+                "low": rec.get("regularMarketDayLow"),
+                "high": rec.get("regularMarketDayHigh")
+            }
+    except:
+        pass
+    return None
+
+
+def get_quote(symbol):
+    out = fetch_nse(symbol)
+    if out and out.get("price"):
+        return out
+    out = fetch_yahoo(symbol)
+    return out or {"price": None, "changePercent": None, "volume": None}
+
+
+# ------------------- CHARTINK ALERT -------------------
 @app.post("/chartink-alert")
 def chartink_alert():
     try:
         token = request.args.get("token")
-        if CHARTINK_TOKEN and token and token != CHARTINK_TOKEN:
-            return jsonify({"ok":False,"error":"Invalid token"}),403
+        if token and token != CHARTINK_TOKEN:
+            return jsonify({"ok": False, "error": "Bad token"}), 403
 
-        data = request.get_json(force=True) or {}
+        data = request.get_json(force=True, silent=True) or {}
         stocks = data.get("stocks") or data.get("symbols") or []
-        if isinstance(stocks, str):
-            stocks = stocks.split(",")
 
-        stocks = [s.strip().upper() for s in stocks if s.strip()]
+        if isinstance(stocks, str):
+            stocks = [s.strip() for s in stocks.split(",") if s.strip()]
 
         if not stocks:
-            gs_post({"action":"chartink_import","payload":{"stocks":[]}})
-            return jsonify({"ok":True})
+            gs_post({"action": "chartink_import", "payload": {"stocks": []}})
+            return jsonify({"ok": True, "msg": "0 stocks"}), 200
 
-        # Sub to FYERS
-        queue_subscribe_symbols(stocks)
+        symbols = []
+        seen = set()
+        for s in stocks:
+            s = s.upper().strip()
+            if s not in seen:
+                seen.add(s)
+                symbols.append(s)
 
-        enriched=[]
-        for sym in stocks:
+        # Fetch prices
+        enriched = []
+        for sym in symbols:
             q = get_quote(sym)
             enriched.append({
                 "symbol": sym,
@@ -316,21 +216,22 @@ def chartink_alert():
             "action": "chartink_import",
             "payload": {"stocks": enriched}
         }
+
         res = gs_post(payload)
-        return jsonify({"ok":True,"webapp":res})
+        send_telegram(f"📥 Imported {len(enriched)} stocks")
+
+        return jsonify({"ok": True, "webapp": res}), 200
+
     except Exception as e:
-        return jsonify({"ok":False,"error":str(e)}),500
+        send_telegram(f"❌ Error: {e}")
+        return jsonify({"ok": False, "error": str(e)}), 500
+
 
 @app.get("/health")
 def health():
-    return jsonify({"ok":True})
+    return jsonify({"ok": True, "ts": int(time.time())})
+
 
 if __name__ == "__main__":
-    print("Starting Service")
-    try:
-        tokens = load_fyers_tokens()
-        if tokens.get("access_token"):
-            start_fyers_ws_background()
-    except:
-        pass
-    app.run(host="0.0.0.0", port=int(os.getenv("PORT","10000")))
+    print("Starting RajanTradeAutomation (FINAL BUILD)...")
+    app.run(host="0.0.0.0", port=int(os.getenv("PORT", "10000")))
