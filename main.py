@@ -1,8 +1,4 @@
-# ============================================================
-#  RajanTradeAutomation - FINAL STABLE main.py
-#  Fyers Auth (using api-t1) + Live Data + Chartink Webhook
-# ============================================================
-
+# RajanTradeAutomation - Stable FYERS Auth + Chartink Enrichment
 from flask import Flask, request, jsonify
 import os, requests, time, traceback, json
 
@@ -10,157 +6,77 @@ app = Flask(__name__)
 
 # ------------------- ENV -------------------
 WEBAPP_EXEC_URL = os.getenv("WEBAPP_EXEC_URL")
-
 CHARTINK_TOKEN  = os.getenv("CHARTINK_TOKEN", "RAJAN123")
 TELEGRAM_TOKEN  = os.getenv("TELEGRAM_TOKEN", "")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
-USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
 
-# FYERS
-FYERS_CLIENT_ID = os.getenv("FYERS_CLIENT_ID", "")
-FYERS_SECRET_KEY = os.getenv("FYERS_SECRET_KEY", "")
-FYERS_REDIRECT_URI = os.getenv("FYERS_REDIRECT_URI", "")
-FYERS_ACCESS_TOKEN = os.getenv("FYERS_ACCESS_TOKEN", "")
+FYERS_CLIENT_ID = os.getenv("FYERS_CLIENT_ID")     # e.g. N83M354FQO-100
+FYERS_SECRET_KEY = os.getenv("FYERS_SECRET_KEY")   # e.g. 9UUVU79KW8
+FYERS_REDIRECT_URI = os.getenv("FYERS_REDIRECT_URI")  # https://rajantradeautomation.onrender.com/fyers-redirect
 
+USER_AGENT = "Mozilla/5.0"
+
+# Token storage file
 TOKEN_FILE = "fyers_token.json"
 
 
-# ------------------- TELEGRAM -------------------
+
+# ------------------- Telegram -------------------
 def send_telegram(msg):
-    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
-        print("Telegram missing")
+    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID: 
         return
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-        requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": msg}, timeout=10)
+        requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": msg})
     except:
         pass
 
 
-# ------------------- GAS POST -------------------
+
+# ------------------- Google Script Forward -------------------
 def gs_post(payload):
     r = requests.post(WEBAPP_EXEC_URL, json=payload, timeout=20)
     try:
         return r.json()
     except:
-        return {"ok": False, "raw": r.text}
+        return {"raw": r.text}
 
 
-# ------------------- SAVE FYERS TOKEN -------------------
-def save_access_token(token):
+
+# ------------------- NSE BASIC FETCH (same as old) -------------------
+def fetch_nse_quote(symbol):
     try:
-        with open(TOKEN_FILE, "w") as f:
-            json.dump({"access_token": token}, f)
-        os.environ["FYERS_ACCESS_TOKEN"] = token
-        return True
-    except:
-        return False
-
-
-# ------------------- LOAD FYERS TOKEN -------------------
-def load_access_token():
-    if os.path.exists(TOKEN_FILE):
-        with open(TOKEN_FILE) as f:
-            return json.load(f).get("access_token")
-    return ""
-
-
-# ------------------- FYERS AUTH URL -------------------
-@app.get("/fyers-auth")
-def fyers_auth():
-    try:
-        if not FYERS_CLIENT_ID or not FYERS_SECRET_KEY or not FYERS_REDIRECT_URI:
-            return jsonify({"ok": False, "error": "Env missing"}), 400
-
-        state = "rajan_state"
-
-        # FINAL WORKING URL → YOU CONFIRMED
-        auth_url = (
-            "https://api-t1.fyers.in/api/v3/generate-authcode?"
-            f"client_id={FYERS_CLIENT_ID}&"
-            f"redirect_uri={requests.utils.quote(FYERS_REDIRECT_URI)}&"
-            f"response_type=code&state={state}"
-        )
-
-        return jsonify({"ok": True, "auth_url": auth_url})
-    except Exception as e:
-        return jsonify({"ok": False, "error": str(e)}), 500
-
-
-# ------------------- FYERS REDIRECT -------------------
-@app.get("/fyers-redirect")
-def fyers_redirect():
-    try:
-        code = request.args.get("auth_code") or request.args.get("code")
-        if not code:
-            return "Missing code", 400
-
-        # Exchange auth_code → access_token
-        url = "https://api.fyers.in/api/v3/validate-authcode"
-        payload = {
-            "grant_type": "authorization_code",
-            "appId": FYERS_CLIENT_ID,
-            "appSecret": FYERS_SECRET_KEY,
-            "auth_code": code
-        }
-
-        r = requests.post(url, json=payload, timeout=15).json()
-
-        if "access_token" not in r:
-            send_telegram(f"❌ FYERS Token Error:\n{r}")
-            return f"Token error: {r}", 500
-
-        access_token = r["access_token"]
-        save_access_token(access_token)
-
-        send_telegram("✅ FYERS Access Token saved successfully.")
-        return "Authentication Success. Token Saved.", 200
-
-    except Exception as e:
-        return f"Error: {e}", 500
-
-
-# ------------------- GET QUOTE (NSE → Yahoo fallback) -------------------
-def fetch_nse(symbol):
-    try:
-        headers = {
-            "User-Agent": USER_AGENT,
-            "Accept": "application/json",
-        }
         s = requests.Session()
-        s.headers.update(headers)
-        _ = s.get("https://www.nseindia.com", timeout=10)
-        url = f"https://www.nseindia.com/api/quote-equity?symbol={symbol}"
-        r = s.get(url, timeout=10)
+        s.headers.update({"User-Agent": USER_AGENT})
+
+        _ = s.get("https://www.nseindia.com", timeout=8)
+        r = s.get(f"https://www.nseindia.com/api/quote-equity?symbol={symbol}", timeout=8)
+
         if r.status_code == 200:
             j = r.json()
             p = j.get("priceInfo", {})
             return {
                 "price": p.get("lastPrice"),
                 "changePercent": p.get("pChange"),
-                "volume": p.get("totalTradedVolume"),
-                "low": p.get("intraDayLow"),
-                "high": p.get("intraDayHigh")
+                "volume": p.get("totalTradedVolume")
             }
     except:
         pass
     return None
 
 
-def fetch_yahoo(symbol):
+def fetch_yahoo_quote(symbol):
     try:
         q = symbol + ".NS"
         url = f"https://query1.finance.yahoo.com/v7/finance/quote?symbols={q}"
-        r = requests.get(url, timeout=10)
-        j = r.json().get("quoteResponse", {}).get("result", [])
+        r = requests.get(url, timeout=8, headers={"User-Agent": USER_AGENT})
+        j = r.json()["quoteResponse"]["result"]
         if j:
             rec = j[0]
             return {
                 "price": rec.get("regularMarketPrice"),
                 "changePercent": rec.get("regularMarketChangePercent"),
-                "volume": rec.get("regularMarketVolume"),
-                "low": rec.get("regularMarketDayLow"),
-                "high": rec.get("regularMarketDayHigh")
+                "volume": rec.get("regularMarketVolume")
             }
     except:
         pass
@@ -168,44 +84,89 @@ def fetch_yahoo(symbol):
 
 
 def get_quote(symbol):
-    out = fetch_nse(symbol)
-    if out and out.get("price"):
+    out = fetch_nse_quote(symbol)
+    if out and out["price"] is not None:
         return out
-    out = fetch_yahoo(symbol)
+    out = fetch_yahoo_quote(symbol)
     return out or {"price": None, "changePercent": None, "volume": None}
 
 
-# ------------------- CHARTINK ALERT -------------------
+
+# ------------------- FYERS AUTH (Stable version) -------------------
+@app.get("/fyers-auth")
+def fyers_auth():
+    try:
+        if not FYERS_CLIENT_ID or not FYERS_REDIRECT_URI:
+            return jsonify({"ok": False, "error": "Missing FYERS env vars"}), 400
+
+        # VERY IMPORTANT → Correct encoded redirect_uri
+        redirect_encoded = requests.utils.quote(FYERS_REDIRECT_URI, safe='')
+
+        auth_url = (
+            f"https://api-t1.fyers.in/api/v3/generate-authcode"
+            f"?client_id={FYERS_CLIENT_ID}"
+            f"&redirect_uri={redirect_encoded}"
+            f"&response_type=code&state=rajan_state"
+        )
+
+        return jsonify({"ok": True, "auth_url": auth_url})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+
+@app.get("/fyers-redirect")
+def fyers_redirect():
+    try:
+        code = request.args.get("code")
+        if not code:
+            return "Missing code", 400
+
+        # generate access_token
+        payload = {
+            "grant_type": "authorization_code",
+            "appId": FYERS_CLIENT_ID,
+            "secret_key": FYERS_SECRET_KEY,
+            "code": code,
+            "redirect_uri": FYERS_REDIRECT_URI
+        }
+
+        r = requests.post(
+            "https://api.fyers.in/api/v3/token",
+            json=payload,
+            headers={"Content-Type": "application/json"}
+        )
+
+        data = r.json()
+
+        # save file
+        with open(TOKEN_FILE, "w") as f:
+            json.dump(data, f)
+
+        send_telegram("✅ FYERS Token Generated & Saved Successfully")
+
+        return "Auth Completed. Token saved."
+
+    except Exception as e:
+        send_telegram("❌ FYERS Redirect Error: " + str(e))
+        return "Error: " + str(e), 500
+
+
+
+# ------------------- CHARTINK ROUTE -------------------
 @app.post("/chartink-alert")
 def chartink_alert():
     try:
-        token = request.args.get("token")
-        if token and token != CHARTINK_TOKEN:
-            return jsonify({"ok": False, "error": "Bad token"}), 403
-
-        data = request.get_json(force=True, silent=True) or {}
-        stocks = data.get("stocks") or data.get("symbols") or []
+        data = request.get_json(force=True) or {}
+        stocks = data.get("stocks", [])
 
         if isinstance(stocks, str):
-            stocks = [s.strip() for s in stocks.split(",") if s.strip()]
+            stocks = [s.strip() for s in stocks.split(",")]
 
-        if not stocks:
-            gs_post({"action": "chartink_import", "payload": {"stocks": []}})
-            return jsonify({"ok": True, "msg": "0 stocks"}), 200
-
-        symbols = []
-        seen = set()
-        for s in stocks:
-            s = s.upper().strip()
-            if s not in seen:
-                seen.add(s)
-                symbols.append(s)
-
-        # Fetch prices
-        enriched = []
-        for sym in symbols:
+        final = []
+        for sym in stocks:
             q = get_quote(sym)
-            enriched.append({
+            final.append({
                 "symbol": sym,
                 "price": q["price"],
                 "changePercent": q["changePercent"],
@@ -214,24 +175,28 @@ def chartink_alert():
 
         payload = {
             "action": "chartink_import",
-            "payload": {"stocks": enriched}
+            "payload": {
+                "stocks": final,
+                "scanner_name": data.get("scanner_name"),
+                "scanner_url": data.get("scanner_url"),
+                "detected_count": len(stocks)
+            }
         }
 
-        res = gs_post(payload)
-        send_telegram(f"📥 Imported {len(enriched)} stocks")
-
-        return jsonify({"ok": True, "webapp": res}), 200
+        gs_post(payload)
+        return {"ok": True}
 
     except Exception as e:
-        send_telegram(f"❌ Error: {e}")
-        return jsonify({"ok": False, "error": str(e)}), 500
+        send_telegram("❌ Chartink Import Error: " + str(e))
+        return {"ok": False, "error": str(e)}, 500
+
 
 
 @app.get("/health")
 def health():
-    return jsonify({"ok": True, "ts": int(time.time())})
+    return {"ok": True, "ts": int(time.time())}
+
 
 
 if __name__ == "__main__":
-    print("Starting RajanTradeAutomation (FINAL BUILD)...")
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", "10000")))
