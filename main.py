@@ -1,79 +1,108 @@
 from flask import Flask, request, jsonify
-import os, requests, json, traceback
-
-from fyers_apiv3 import fyersModel
+import requests
+import os
+import urllib.parse
 
 app = Flask(__name__)
 
-# ----------------- ENV VARS ------------------------
-FYERS_CLIENT_ID   = os.getenv("FYERS_CLIENT_ID")
-FYERS_SECRET_KEY  = os.getenv("FYERS_SECRET_KEY")
-FYERS_REDIRECT_URI = os.getenv("FYERS_REDIRECT_URI")  # MUST MATCH EXACT
-FYERS_TOKEN_FILE  = "fyers_token.json"
+# ------------------------------------------------
+# ENVIRONMENT VARIABLES (Render Settings)
+# ------------------------------------------------
+CLIENT_ID = os.getenv("FYERS_CLIENT_ID")
+SECRET_KEY = os.getenv("FYERS_SECRET_KEY")
+REDIRECT_URI = os.getenv("FYERS_REDIRECT_URI")
 
+# ------------------------------------------------
+# ROOT ROUTE — THIS MUST WORK IN BROWSER
+# ------------------------------------------------
+@app.get("/")
+def root():
+    return (
+        "RajanTradeAutomation is LIVE.<br>"
+        "Use <b>/fyers-auth</b> to start Fyers Login Flow.",
+        200
+    )
 
-# ----------------- SAVE TOKEN ------------------------
-def save_fyers_tokens(data):
-    try:
-        with open(FYERS_TOKEN_FILE, "w") as f:
-            json.dump(data, f)
-        return True
-    except:
-        return False
-
-
-# ------------------------------------------------------
-#   1) GET AUTH URL
-# ------------------------------------------------------
+# ------------------------------------------------
+# FYERS AUTH — GENERATE AUTHCODE URL
+# ------------------------------------------------
 @app.get("/fyers-auth")
 def fyers_auth():
-    try:
-        session = fyersModel.SessionModel(
-            client_id=FYERS_CLIENT_ID,
-            secret_key=FYERS_SECRET_KEY,
-            redirect_uri=FYERS_REDIRECT_URI,
-            response_type="code",
-            state="rajan_state"
-        )
-        auth_url = session.generate_authcode()
-        return jsonify({"ok": True, "auth_url": auth_url})
-    except Exception as e:
-        return jsonify({"ok": False, "error": str(e)}), 500
+
+    if not CLIENT_ID or not REDIRECT_URI:
+        return jsonify({
+            "ok": False,
+            "error": "Environment variables missing"
+        }), 500
+
+    encoded_redirect = urllib.parse.quote(REDIRECT_URI, safe='')
+
+    auth_url = (
+        f"https://api-t1.fyers.in/api/v3/generate-authcode?"
+        f"client_id={CLIENT_ID}"
+        f"&redirect_uri={encoded_redirect}"
+        f"&response_type=code"
+        f"&state=rajan_state"
+    )
+
+    return jsonify({"ok": True, "auth_url": auth_url})
 
 
-# ------------------------------------------------------
-#   2) REDIRECT → EXCHANGE CODE FOR TOKEN
-# ------------------------------------------------------
+# ------------------------------------------------
+# FYERS REDIRECT — FYERS RETURNS ?code=XXXX HERE
+# ------------------------------------------------
 @app.get("/fyers-redirect")
 def fyers_redirect():
-    try:
-        auth_code = request.args.get("code")
 
-        if not auth_code:
-            return "Missing code", 400
+    code = request.args.get("code")
 
-        session = fyersModel.SessionModel(
-            client_id=FYERS_CLIENT_ID,
-            secret_key=FYERS_SECRET_KEY,
-            redirect_uri=FYERS_REDIRECT_URI,
-            response_type="code",
-            grant_type="authorization_code"
+    if not code:
+        return (
+            "Missing code. Fyers did not return ?code=xxxx<br>"
+            "Login was NOT completed.",
+            400
         )
 
-        session.set_token(auth_code)
-        token = session.generate_token()
+    print("=====================================")
+    print("Received AUTH CODE from FYERS:", code)
+    print("=====================================")
 
-        save_fyers_tokens(token)
+    # ------------------------------------------------
+    # STEP 2 — Exchange code → access token
+    #
+    # (We will enable this AFTER root route works and
+    #  redirect works. No need to activate now)
+    # ------------------------------------------------
+    #
+    # token_request = {
+    #     "grant_type": "authorization_code",
+    #     "appId": CLIENT_ID,
+    #     "code": code,
+    #     "secret_key": SECRET_KEY
+    # }
+    #
+    # res = requests.post("https://api.fyers.in/api/v3/token", json=token_request)
+    # token_data = res.json()
+    #
+    # return jsonify(token_data)
 
-        return "FYERS Auth Successful! Token saved."
-    except Exception as e:
-        return f"Auth error: {e}", 500
+    return (
+        f"Auth CODE received successfully: {code}<br>"
+        f"Token exchange ready.",
+        200
+    )
 
 
+# ------------------------------------------------
+# HEALTH CHECK — FOR RENDER
+# ------------------------------------------------
 @app.get("/health")
 def health():
-    return {"ok": True}
+    return jsonify({"ok": True, "service": "RajanTradeAutomation"})
 
 
+# ------------------------------------------------
+# START SERVER
+# ------------------------------------------------
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.getenv("PORT", "10000")))
+    app.run(host="0.0.0.0", port=10000)
