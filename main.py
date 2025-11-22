@@ -8,12 +8,13 @@ app = Flask(__name__)
 # ------------------------------------------------
 # ENVIRONMENT VARIABLES (Render Settings)
 # ------------------------------------------------
-CLIENT_ID = os.getenv("FYERS_CLIENT_ID")
-SECRET_KEY = os.getenv("FYERS_SECRET_KEY")
-REDIRECT_URI = os.getenv("FYERS_REDIRECT_URI")
+CLIENT_ID = os.getenv("FYERS_CLIENT_ID")          # Example: N83MS34FQO-100
+SECRET_KEY = os.getenv("FYERS_SECRET_KEY")        # Example: 9UUVU79KWB
+REDIRECT_URI = os.getenv("FYERS_REDIRECT_URI")    # Example: https://rajantradeautomation.onrender.com/fyers-redirect
+
 
 # ------------------------------------------------
-# ROOT ROUTE — THIS MUST WORK IN BROWSER
+# ROOT ROUTE — TEST PURPOSE
 # ------------------------------------------------
 @app.get("/")
 def root():
@@ -23,33 +24,37 @@ def root():
         200
     )
 
+
 # ------------------------------------------------
-# FYERS AUTH — GENERATE AUTHCODE URL
+# STEP 1 — GENERATE AUTH URL
 # ------------------------------------------------
 @app.get("/fyers-auth")
 def fyers_auth():
+    try:
+        if not CLIENT_ID or not REDIRECT_URI:
+            return jsonify({
+                "ok": False,
+                "error": "Environment variables missing"
+            }), 500
 
-    if not CLIENT_ID or not REDIRECT_URI:
-        return jsonify({
-            "ok": False,
-            "error": "Environment variables missing"
-        }), 500
+        encoded_redirect = urllib.parse.quote(REDIRECT_URI, safe='')
 
-    encoded_redirect = urllib.parse.quote(REDIRECT_URI, safe='')
+        auth_url = (
+            f"https://api-t1.fyers.in/api/v3/generate-authcode?"
+            f"client_id={CLIENT_ID}"
+            f"&redirect_uri={encoded_redirect}"
+            f"&response_type=code"
+            f"&state=rajan_state"
+        )
 
-    auth_url = (
-        f"https://api-t1.fyers.in/api/v3/generate-authcode?"
-        f"client_id={CLIENT_ID}"
-        f"&redirect_uri={encoded_redirect}"
-        f"&response_type=code"
-        f"&state=rajan_state"
-    )
+        return jsonify({"ok": True, "auth_url": auth_url})
 
-    return jsonify({"ok": True, "auth_url": auth_url})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)})
 
 
 # ------------------------------------------------
-# FYERS REDIRECT — FYERS RETURNS ?code=XXXX HERE
+# STEP 2 — RECEIVE AUTH CODE & EXCHANGE TOKEN
 # ------------------------------------------------
 @app.get("/fyers-redirect")
 def fyers_redirect():
@@ -67,34 +72,28 @@ def fyers_redirect():
     print("Received AUTH CODE from FYERS:", code)
     print("=====================================")
 
-    # ------------------------------------------------
-    # STEP 2 — Exchange code → access token
-    #
-    # (We will enable this AFTER root route works and
-    #  redirect works. No need to activate now)
-    # ------------------------------------------------
-    #
-    # token_request = {
-    #     "grant_type": "authorization_code",
-    #     "appId": CLIENT_ID,
-    #     "code": code,
-    #     "secret_key": SECRET_KEY
-    # }
-    #
-    # res = requests.post("https://api.fyers.in/api/v3/token", json=token_request)
-    # token_data = res.json()
-    #
-    # return jsonify(token_data)
+    # -------- ACCESS TOKEN REQUEST --------
+    token_request = {
+        "grant_type": "authorization_code",
+        "appId": CLIENT_ID,        # Example: N83MS34FQO-100
+        "code": code,
+        "secret_key": SECRET_KEY
+    }
 
-    return (
-        f"Auth CODE received successfully: {code}<br>"
-        f"Token exchange ready.",
-        200
-    )
+    try:
+        res = requests.post("https://api.fyers.in/api/v3/token", json=token_request)
+        token_data = res.json()
+
+        print("TOKEN RESPONSE:", token_data)
+
+        return jsonify(token_data)
+
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)})
 
 
 # ------------------------------------------------
-# HEALTH CHECK — FOR RENDER
+# HEALTH CHECK (Render)
 # ------------------------------------------------
 @app.get("/health")
 def health():
@@ -102,7 +101,7 @@ def health():
 
 
 # ------------------------------------------------
-# START SERVER
+# START SERVER (Render)
 # ------------------------------------------------
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=10000)
