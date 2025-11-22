@@ -59,12 +59,15 @@ def fyers_auth():
 @app.get("/fyers-redirect")
 def fyers_redirect():
 
-    code = request.args.get("code")
+    # FIX: Fyers sometimes sends ?auth_code=XXXX instead of ?code=XXXX
+    code = request.args.get("auth_code") or request.args.get("code")
 
-    if not code:
+    print("Incoming redirect parameters:", dict(request.args))
+
+    if not code or code == "200":
         return (
-            "Missing code. Fyers did not return ?code=xxxx<br>"
-            "Login was NOT completed.",
+            "Auth code missing or invalid.<br>"
+            f"Received Query Params: {dict(request.args)}",
             400
         )
 
@@ -75,17 +78,25 @@ def fyers_redirect():
     # -------- ACCESS TOKEN REQUEST --------
     token_request = {
         "grant_type": "authorization_code",
-        "appId": CLIENT_ID,        # Example: N83MS34FQO-100
+        "appId": CLIENT_ID,
         "code": code,
         "secret_key": SECRET_KEY
     }
 
     try:
         res = requests.post("https://api.fyers.in/api/v3/token", json=token_request)
-        token_data = res.json()
+        
+        # FYERS sometimes returns HTML on 503 → avoid JSON parse error
+        try:
+            token_data = res.json()
+        except:
+            return (
+                f"Token endpoint returned non-JSON response (status={res.status_code}):<br><br>"
+                + res.text,
+                503
+            )
 
         print("TOKEN RESPONSE:", token_data)
-
         return jsonify(token_data)
 
     except Exception as e:
