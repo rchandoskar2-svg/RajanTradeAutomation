@@ -1,50 +1,60 @@
 from flask import Flask, request, jsonify
 import requests
 import os
-import urllib.parse
 
 app = Flask(__name__)
 
-CLIENT_ID = os.getenv("FYERS_CLIENT_ID")
+# ---------------------------------------
+# ENV VARIABLES FROM RENDER
+# ---------------------------------------
+CLIENT_ID = os.getenv("FYERS_CLIENT_ID")          # Example: N83MS34FQO-100
 SECRET_KEY = os.getenv("FYERS_SECRET_KEY")
-REDIRECT_URI = os.getenv("FYERS_REDIRECT_URI")
+REDIRECT_URI = os.getenv("FYERS_REDIRECT_URI")    # MUST be exact, no encoding
 
+
+# ---------------------------------------
+# ROOT
+# ---------------------------------------
 @app.get("/")
-def root():
-    return (
-        "RajanTradeAutomation is LIVE.<br>"
-        "Use <b>/fyers-auth</b> to start Fyers Login Flow.",
-        200
-    )
+def index():
+    return "RajanTradeAutomation — LIVE", 200
 
+
+# ---------------------------------------
+# STEP 1 — GENERATE AUTHCODE URL
+# ---------------------------------------
 @app.get("/fyers-auth")
 def fyers_auth():
-    try:
-        encoded_redirect = urllib.parse.quote(REDIRECT_URI, safe='')
-        auth_url = (
-            f"https://api-t1.fyers.in/api/v3/generate-authcode?"
-            f"client_id={CLIENT_ID}"
-            f"&redirect_uri={encoded_redirect}"
-            f"&response_type=code"
-            f"&state=rajan_state"
-        )
-        return jsonify({"ok": True, "auth_url": auth_url})
-    except Exception as e:
-        return jsonify({"ok": False, "error": str(e)})
 
+    if not CLIENT_ID or not SECRET_KEY or not REDIRECT_URI:
+        return jsonify({"ok": False, "error": "Missing env vars"}), 500
+
+    # DO NOT url-encode redirect_uri (Fyers internally handles this)
+    auth_url = (
+        "https://api.fyers.in/api/v3/generate-authcode"
+        f"?client_id={CLIENT_ID}"
+        f"&redirect_uri={REDIRECT_URI}"
+        "&response_type=code"
+        "&state=rajan_state"
+    )
+
+    return jsonify({"ok": True, "auth_url": auth_url})
+
+
+# ---------------------------------------
+# STEP 2 — RECEIVE AUTH CODE + EXCHANGE FOR TOKEN
+# ---------------------------------------
 @app.get("/fyers-redirect")
 def fyers_redirect():
 
     code = request.args.get("code")
 
     if not code:
-        return "Missing code. Login failed.", 400
+        return jsonify({"ok": False, "error": "Missing ?code=xxxx from Fyers"}), 400
 
-    print("=====================================")
     print("AUTH CODE:", code)
-    print("=====================================")
 
-    token_request = {
+    token_req = {
         "grant_type": "authorization_code",
         "appId": CLIENT_ID,
         "code": code,
@@ -52,23 +62,31 @@ def fyers_redirect():
     }
 
     try:
-        # IMPORTANT FIX → Use api-t1 domain
-        res = requests.post("https://api-t1.fyers.in/api/v3/token", json=token_request)
-        text = res.text
+        r = requests.post("https://api.fyers.in/api/v3/token", json=token_req)
+        txt = r.text
 
-        print("RAW TOKEN RESPONSE:", text)
+        print("RAW TOKEN RESPONSE:", txt)
 
-        try:
-            return jsonify(res.json())
-        except:
-            return f"Token endpoint returned non-JSON response (status={res.status_code}):\n\n{text}"
+        # If HTML returned => convert error
+        if txt.startswith("<"):
+            return jsonify({"ok": False, "error": "Fyers returned HTML (503/500)", "html": txt}), 503
+
+        return jsonify(r.json())
 
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)})
 
+
+# ---------------------------------------
+# HEALTH
+# ---------------------------------------
 @app.get("/health")
 def health():
     return jsonify({"ok": True})
 
+
+# ---------------------------------------
+# SERVER
+# ---------------------------------------
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=10000)
