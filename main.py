@@ -81,22 +81,10 @@ def fyers_redirect():
     }
 
     try:
-        #  ⭐ THE CORRECT TOKEN URL
-        token_url = "https://api-t1.fyers.in/api/v3/token"
+        res = requests.post("https://api.fyers.in/api/v3/token", json=token_request)
+        token_data = res.json()
 
-        res = requests.post(token_url, json=token_request)
-        print("Status Code:", res.status_code)
-        print("Raw Response:", res.text)
-
-        # if API returned non-JSON, handle gracefully
-        try:
-            token_data = res.json()
-        except:
-            return (
-                f"Token endpoint returned non-JSON response (status={res.status_code})<br><br>"
-                f"{res.text}",
-                500
-            )
+        print("TOKEN RESPONSE:", token_data)
 
         return jsonify(token_data)
 
