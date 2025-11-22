@@ -14,7 +14,7 @@ REDIRECT_URI = os.getenv("FYERS_REDIRECT_URI")    # Example: https://rajantradea
 
 
 # ------------------------------------------------
-# ROOT ROUTE
+# ROOT ROUTE — TEST PURPOSE
 # ------------------------------------------------
 @app.get("/")
 def root():
@@ -26,28 +26,31 @@ def root():
 
 
 # ------------------------------------------------
-# STEP 1 — GENERATE FYERS AUTH URL
+# STEP 1 — GENERATE AUTH URL
 # ------------------------------------------------
 @app.get("/fyers-auth")
 def fyers_auth():
+    try:
+        if not CLIENT_ID or not REDIRECT_URI:
+            return jsonify({
+                "ok": False,
+                "error": "Environment variables missing"
+            }), 500
 
-    if not CLIENT_ID or not REDIRECT_URI:
-        return jsonify({
-            "ok": False,
-            "error": "CLIENT_ID or REDIRECT_URI missing"
-        }), 500
+        encoded_redirect = urllib.parse.quote(REDIRECT_URI, safe='')
 
-    encoded_redirect = urllib.parse.quote(REDIRECT_URI, safe='')
+        auth_url = (
+            f"https://api-t1.fyers.in/api/v3/generate-authcode?"
+            f"client_id={CLIENT_ID}"
+            f"&redirect_uri={encoded_redirect}"
+            f"&response_type=code"
+            f"&state=rajan_state"
+        )
 
-    auth_url = (
-        f"https://api-t1.fyers.in/api/v3/generate-authcode?"
-        f"client_id={CLIENT_ID}"
-        f"&redirect_uri={encoded_redirect}"
-        f"&response_type=code"
-        f"&state=rajan_state"
-    )
+        return jsonify({"ok": True, "auth_url": auth_url})
 
-    return jsonify({"ok": True, "auth_url": auth_url})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)})
 
 
 # ------------------------------------------------
@@ -56,42 +59,43 @@ def fyers_auth():
 @app.get("/fyers-redirect")
 def fyers_redirect():
 
-    # Sometimes Fyers sends ?auth_code, sometimes ?code
-    code = request.args.get("auth_code") or request.args.get("code")
+    code = request.args.get("code")
 
     if not code:
         return (
-            "Fyers did not return ?code or ?auth_code<br>"
-            "Login NOT completed.",
+            "Missing code. Fyers did not return ?code=xxxx<br>"
+            "Login was NOT completed.",
             400
         )
 
     print("=====================================")
-    print("AUTH CODE Received:", code)
+    print("Received AUTH CODE from FYERS:", code)
     print("=====================================")
 
-    # Token request payload
+    # -------- ACCESS TOKEN REQUEST --------
     token_request = {
         "grant_type": "authorization_code",
-        "appId": CLIENT_ID,
+        "appId": CLIENT_ID,        # Example: N83MS34FQO-100
         "code": code,
         "secret_key": SECRET_KEY
     }
 
     try:
-        res = requests.post("https://api.fyers.in/api/v3/token", json=token_request)
-        text = res.text
-        
-        print("RAW TOKEN RESPONSE:", text)
+        #  ⭐ THE CORRECT TOKEN URL
+        token_url = "https://api-t1.fyers.in/api/v3/token"
 
-        # Try to parse JSON, fallback if HTML
+        res = requests.post(token_url, json=token_request)
+        print("Status Code:", res.status_code)
+        print("Raw Response:", res.text)
+
+        # if API returned non-JSON, handle gracefully
         try:
             token_data = res.json()
         except:
             return (
                 f"Token endpoint returned non-JSON response (status={res.status_code})<br><br>"
-                f"{text}",
-                503
+                f"{res.text}",
+                500
             )
 
         return jsonify(token_data)
@@ -101,7 +105,7 @@ def fyers_redirect():
 
 
 # ------------------------------------------------
-# HEALTH CHECK
+# HEALTH CHECK (Render)
 # ------------------------------------------------
 @app.get("/health")
 def health():
@@ -109,7 +113,7 @@ def health():
 
 
 # ------------------------------------------------
-# START SERVER
+# START SERVER (Render)
 # ------------------------------------------------
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=10000)
