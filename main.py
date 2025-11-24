@@ -1,6 +1,7 @@
 from flask import Flask, request, jsonify
 import os
 import urllib.parse
+import requests
 from fyers_apiv3 import fyersModel
 
 app = Flask(__name__)
@@ -8,9 +9,9 @@ app = Flask(__name__)
 # ---------------------------------------------
 # ENVIRONMENT VARIABLES
 # ---------------------------------------------
-CLIENT_ID = os.getenv("FYERS_CLIENT_ID")          # N83MS34FQO-100
-SECRET_KEY = os.getenv("FYERS_SECRET_KEY")        # 9UUVU79KW8
-REDIRECT_URI = os.getenv("FYERS_REDIRECT_URI")    # https://rajantradeautomation.onrender.com/fyers-redirect
+CLIENT_ID = os.getenv("FYERS_CLIENT_ID")
+SECRET_KEY = os.getenv("FYERS_SECRET_KEY")
+REDIRECT_URI = os.getenv("FYERS_REDIRECT_URI")
 
 RESPONSE_TYPE = "code"
 GRANT_TYPE = "authorization_code"
@@ -51,8 +52,6 @@ def fyers_redirect():
 
     auth_code = request.args.get("auth_code")
     code = request.args.get("code")
-
-    # Fyers sometimes returns auth_code, sometimes code
     final_code = auth_code or code
 
     if not final_code:
@@ -62,9 +61,6 @@ def fyers_redirect():
     print("AUTH CODE RECEIVED:", final_code)
     print("==========================")
 
-    # -----------------------------------------
-    # Use FYERS SDK for token exchange
-    # -----------------------------------------
     session = fyersModel.SessionModel(
         client_id=CLIENT_ID,
         secret_key=SECRET_KEY,
@@ -81,6 +77,36 @@ def fyers_redirect():
     return jsonify(response)
 
 
+
+# -------------------------------------------------
+# TEMPORARY TEST ROUTE → FYERS PROFILE
+# -------------------------------------------------
+@app.get("/fyers-profile")
+def fyers_profile():
+
+    ACCESS_TOKEN = os.getenv("FYERS_ACCESS_TOKEN")
+    CID = os.getenv("FYERS_CLIENT_ID")
+
+    if not ACCESS_TOKEN:
+        return {"ok": False, "error": "No access token found"}
+
+    headers = {
+        "Authorization": f"{CID}:{ACCESS_TOKEN}"
+    }
+
+    url = "https://api.fyers.in/api/v3/profile"
+
+    res = requests.get(url, headers=headers)
+
+    print("PROFILE RESPONSE:", res.text)
+
+    try:
+        return res.json()
+    except:
+        return {"ok": False, "error": "Non-JSON response", "raw": res.text}
+
+
+
 # ---------------------------------------------
 # HEALTH
 # ---------------------------------------------
@@ -94,27 +120,3 @@ def health():
 # ---------------------------------------------
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=10000)
-
-@app.get("/fyers-profile")
-def fyers_profile():
-    try:
-        ACCESS_TOKEN = os.getenv("FYERS_ACCESS_TOKEN")
-        CLIENT_ID = os.getenv("FYERS_CLIENT_ID")
-
-        if not ACCESS_TOKEN:
-            return {"ok": False, "error": "No access token found"}
-
-        headers = {
-            "Authorization": f"{CLIENT_ID}:{ACCESS_TOKEN}"
-        }
-
-        url = "https://api.fyers.in/api/v3/profile"
-
-        res = requests.get(url, headers=headers)
-
-        print("PROFILE RESPONSE:", res.text)
-
-        return res.json()
-
-    except Exception as e:
-        return {"ok": False, "error": str(e)}
