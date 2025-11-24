@@ -94,3 +94,27 @@ def health():
 # ---------------------------------------------
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=10000)
+
+@app.get("/fyers-profile")
+def fyers_profile():
+    try:
+        ACCESS_TOKEN = os.getenv("FYERS_ACCESS_TOKEN")
+        CLIENT_ID = os.getenv("FYERS_CLIENT_ID")
+
+        if not ACCESS_TOKEN:
+            return {"ok": False, "error": "No access token found"}
+
+        headers = {
+            "Authorization": f"{CLIENT_ID}:{ACCESS_TOKEN}"
+        }
+
+        url = "https://api.fyers.in/api/v3/profile"
+
+        res = requests.get(url, headers=headers)
+
+        print("PROFILE RESPONSE:", res.text)
+
+        return res.json()
+
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
