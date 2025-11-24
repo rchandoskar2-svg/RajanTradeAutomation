@@ -1,95 +1,96 @@
 from flask import Flask, request, jsonify
-import requests
 import os
 import urllib.parse
+from fyers_apiv3 import fyersModel
 
 app = Flask(__name__)
 
-# ------------------------------------------------
-# ENV VARS
-# ------------------------------------------------
+# ---------------------------------------------
+# ENVIRONMENT VARIABLES
+# ---------------------------------------------
 CLIENT_ID = os.getenv("FYERS_CLIENT_ID")          # N83MS34FQO-100
 SECRET_KEY = os.getenv("FYERS_SECRET_KEY")        # 9UUVU79KW8
 REDIRECT_URI = os.getenv("FYERS_REDIRECT_URI")    # https://rajantradeautomation.onrender.com/fyers-redirect
 
+RESPONSE_TYPE = "code"
+GRANT_TYPE = "authorization_code"
 
-# ------------------------------------------------
+
+# ---------------------------------------------
 # ROOT
-# ------------------------------------------------
+# ---------------------------------------------
 @app.get("/")
-def root():
-    return "RajanTradeAutomation is LIVE.<br>Visit /fyers-auth", 200
+def home():
+    return "RajanTradeAutomation LIVE<br>Use /fyers-auth to start.", 200
 
 
-# ------------------------------------------------
-# STEP 1 — GENERATE AUTHCODE URL
-# ------------------------------------------------
+# ---------------------------------------------
+# STEP 1 → GENERATE AUTHCODE URL
+# ---------------------------------------------
 @app.get("/fyers-auth")
-def fyers_auth():
+def make_auth_url():
 
     encoded_redirect = urllib.parse.quote(REDIRECT_URI, safe='')
 
-    # IMPORTANT: Using api-t1 — this is required
     auth_url = (
         f"https://api-t1.fyers.in/api/v3/generate-authcode?"
         f"client_id={CLIENT_ID}"
         f"&redirect_uri={encoded_redirect}"
-        f"&response_type=code"
+        f"&response_type={RESPONSE_TYPE}"
         f"&state=rajan_state"
     )
 
     return jsonify({"auth_url": auth_url})
 
 
-# ------------------------------------------------
-# STEP 2 — REDIRECT HANDLING
-# ------------------------------------------------
+# ---------------------------------------------
+# STEP 2 → FYERS RETURNS ?auth_code=XXXX
+# ---------------------------------------------
 @app.get("/fyers-redirect")
 def fyers_redirect():
 
-    auth_code = request.args.get("auth_code") or request.args.get("code")
+    auth_code = request.args.get("auth_code")
+    code = request.args.get("code")
 
-    if not auth_code:
-        return "Error: auth_code missing", 400
+    # Fyers sometimes returns auth_code, sometimes code
+    final_code = auth_code or code
 
-    print("\n============================")
-    print("AUTH CODE RECEIVED:", auth_code)
-    print("============================\n")
+    if not final_code:
+        return jsonify({"error": "No auth_code received"}), 400
 
-    token_payload = {
-        "grant_type": "authorization_code",
-        "appId": CLIENT_ID,
-        "code": auth_code,
-        "secret_key": SECRET_KEY,
-        "redirect_uri": REDIRECT_URI
-    }
+    print("==========================")
+    print("AUTH CODE RECEIVED:", final_code)
+    print("==========================")
 
-    print("\nSending token request...\n")
-
-    r = requests.post(
-        "https://api-t1.fyers.in/api/v3/token",
-        json=token_payload
+    # -----------------------------------------
+    # Use FYERS SDK for token exchange
+    # -----------------------------------------
+    session = fyersModel.SessionModel(
+        client_id=CLIENT_ID,
+        secret_key=SECRET_KEY,
+        redirect_uri=REDIRECT_URI,
+        response_type=RESPONSE_TYPE,
+        grant_type=GRANT_TYPE
     )
 
-    try:
-        token_data = r.json()
-    except:
-        return "FYERS returned non-JSON response:\n" + r.text, 503
+    session.set_token(final_code)
+    response = session.generate_token()
 
-    print("\nTOKEN RESPONSE:")
-    print(token_data)
-    print("\n")
+    print("TOKEN RESPONSE:", response)
 
-    return jsonify(token_data)
+    return jsonify(response)
 
 
-# ------------------------------------------------
-# HEALTH CHECK
-# ------------------------------------------------
+# ---------------------------------------------
+# HEALTH
+# ---------------------------------------------
 @app.get("/health")
 def health():
     return jsonify({"ok": True})
 
 
+# ---------------------------------------------
+# RUN SERVER
+# ---------------------------------------------
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=10000)
