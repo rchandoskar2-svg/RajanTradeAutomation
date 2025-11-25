@@ -76,7 +76,7 @@ def fyers_redirect():
 
 
 # ----------------------------------------------------
-# PROFILE API TEST (LIVE DATA CONFIRMATION)
+# PROFILE API (CORRECT URL)
 # ----------------------------------------------------
 @app.get("/fyers-profile")
 def fyers_profile():
@@ -88,7 +88,8 @@ def fyers_profile():
 
     headers = {"Authorization": f"{CLIENT_ID}:{ACCESS_TOKEN}"}
 
-    url = "https://api.fyers.in/api/v3/profile"
+    # ✅ Correct V3 profile API (old one blocked)
+    url = "https://api-t1.fyers.in/api/v3/profile"
 
     res = requests.get(url, headers=headers)
 
