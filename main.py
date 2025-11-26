@@ -12,20 +12,25 @@ app = Flask(__name__)
 CLIENT_ID = os.getenv("FYERS_CLIENT_ID")
 SECRET_KEY = os.getenv("FYERS_SECRET_KEY")
 REDIRECT_URI = os.getenv("FYERS_REDIRECT_URI")
+ACCESS_TOKEN = os.getenv("FYERS_ACCESS_TOKEN")   # For live data
 
 RESPONSE_TYPE = "code"
 GRANT_TYPE = "authorization_code"
 
-# 🔹 Fyers data base (LIVE data इथून येईल)
-FYERS_DATA_BASE = "https://api-t1.fyers.in/data"
-
 
 # ----------------------------------------------------
-# ROOT TEST
+# ROOT
 # ----------------------------------------------------
 @app.get("/")
 def home():
-    return "RajanTradeAutomation LIVE ✔<br>Use /fyers-auth to login."
+    return """
+    RajanTradeAutomation LIVE ✔<br>
+    <br>
+    <a href='/fyers-auth'>Login to Fyers</a><br>
+    <a href='/fyers-profile'>Check Fyers Profile</a><br>
+    <a href='/fyers-quote?symbol=SBIN'>Test Live Quote</a><br>
+    <a href='/debug-info'>Debug Info</a><br>
+    """
 
 
 # ----------------------------------------------------
@@ -34,7 +39,6 @@ def home():
 @app.get("/fyers-auth")
 def fyers_auth():
     encoded_redirect = urllib.parse.quote(REDIRECT_URI, safe='')
-
     url = (
         f"https://api-t1.fyers.in/api/v3/generate-authcode?"
         f"client_id={CLIENT_ID}"
@@ -42,7 +46,6 @@ def fyers_auth():
         f"&response_type={RESPONSE_TYPE}"
         f"&state=rajan_state"
     )
-
     return jsonify({"auth_url": url})
 
 
@@ -52,15 +55,12 @@ def fyers_auth():
 @app.get("/fyers-redirect")
 def fyers_redirect():
 
-    auth_code = request.args.get("auth_code")
-    code = request.args.get("code")
+    code = request.args.get("auth_code") or request.args.get("code")
 
-    final_code = auth_code or code
-
-    if not final_code:
+    if not code:
         return jsonify({"error": "No auth code received"}), 400
 
-    print("FYERS AUTH CODE:", final_code)
+    print("FYERS AUTH CODE:", code)
 
     session = fyersModel.SessionModel(
         client_id=CLIENT_ID,
@@ -69,135 +69,85 @@ def fyers_redirect():
         response_type=RESPONSE_TYPE,
         grant_type=GRANT_TYPE
     )
-
-    session.set_token(final_code)
+    session.set_token(code)
     response = session.generate_token()
-
     print("TOKEN RESPONSE:", response)
 
     return jsonify(response)
 
 
 # ----------------------------------------------------
-# HELPER: auth header for data APIs
-# ----------------------------------------------------
-def get_auth_header():
-    access_token = os.getenv("FYERS_ACCESS_TOKEN")
-    if not (CLIENT_ID and access_token):
-        return None
-    return {"Authorization": f"{CLIENT_ID}:{access_token}"}
-
-
-# ----------------------------------------------------
-# PROFILE API TEST (LIVE DATA CONFIRMATION)
+# FYERS PROFILE
 # ----------------------------------------------------
 @app.get("/fyers-profile")
 def fyers_profile():
 
-    headers = get_auth_header()
-    if not headers:
-        return {"ok": False, "error": "Access token or client id missing in Render ENV"}, 400
+    if not ACCESS_TOKEN:
+        return {"ok": False, "error": "Access token missing in Render ENV"}, 400
 
-    # ✅ Correct api-t1 profile URL
-    url = "https://api-t1.fyers.in/api/v3/profile"
+    headers = {"Authorization": f"{CLIENT_ID}:{ACCESS_TOKEN}"}
+    url = "https://api.fyers.in/api/v3/profile"
 
-    res = requests.get(url, headers=headers)
+    r = requests.get(url, headers=headers)
 
-    # FYERS sometimes returns HTML on failure
     try:
-        return res.json()
-    except Exception:
-        return {
-            "ok": False,
-            "error": "Non-JSON response",
-            "raw": res.text
-        }
+        return r.json()
+    except:
+        return {"ok": False, "raw": r.text}
 
 
 # ----------------------------------------------------
-# FYERS QUOTE (LIVE LTP + VOLUME + %CHG)
+# FYERS QUOTE (LIVE PRICE)
 # ----------------------------------------------------
-@app.post("/fyers-quote")
+@app.get("/fyers-quote")
 def fyers_quote():
-    """
-    Expected JSON:
-    {
-      "symbols": ["NSE:SBIN-EQ", "NSE:RELIANCE-EQ"]
-    }
-    """
-    body = request.get_json(silent=True) or {}
-    symbols = body.get("symbols")
 
-    if not symbols or not isinstance(symbols, list):
-        return jsonify({"ok": False, "error": "symbols list required"}), 400
+    symbol = request.args.get("symbol", "SBIN")
 
-    headers = get_auth_header()
-    if not headers:
-        return jsonify({"ok": False, "error": "Auth missing (check FYERS_CLIENT_ID / FYERS_ACCESS_TOKEN)"}), 400
+    if not ACCESS_TOKEN:
+        return {"ok": False, "error": "Access token missing in Render ENV"}, 400
 
-    symbol_str = ",".join(symbols)
-    url = f"{FYERS_DATA_BASE}/quotes"
+    url = "https://api.fyers.in/data-rest/v2/quotes/"
+    headers = {"Authorization": f"{CLIENT_ID}:{ACCESS_TOKEN}"}
+
+    payload = {"symbols": f"NSE:{symbol}-EQ"}
+
+    r = requests.post(url, json=payload, headers=headers)
 
     try:
-        res = requests.get(url, headers=headers, params={"symbols": symbol_str}, timeout=5)
-        data = res.json()
-    except Exception as e:
-        return jsonify({"ok": False, "error": f"quote API error: {e}"}), 500
-
-    return jsonify(data)
+        return r.json()
+    except:
+        return {"ok": False, "raw": r.text}
 
 
 # ----------------------------------------------------
-# FYERS OHLC / HISTORY (15m / 1h / Daily candles)
+# 🔥 DEBUG ENDPOINT (Chartink Payload Capture)
 # ----------------------------------------------------
-@app.post("/fyers-ohlc")
-def fyers_ohlc():
-    """
-    Expected JSON:
-    {
-      "symbol": "NSE:SBIN-EQ",
-      "resolution": "15",          # "1","3","5","15","30","60","240","D"
-      "date_format": 1,            # 0 = epoch, 1 = yyyy-mm-dd
-      "range_from": "2025-11-25",  # depending on date_format
-      "range_to":   "2025-11-25",
-      "cont_flag": "1"
+@app.post("/debug-chartink")
+def debug_chartink():
+    print("\n\n=======================")
+    print("🔥 RAW CHARTINK ALERT 🔥")
+    print("=======================\n")
+
+    print("Headers:", dict(request.headers))
+    print("Query Params:", request.args)
+    print("Form Data:", request.form)
+    print("JSON Body:", request.json)
+    print("Raw Body:", request.data)
+
+    return {"ok": True, "msg": "Captured Chartink data"}
+
+
+# ----------------------------------------------------
+# DEBUG INFO
+# ----------------------------------------------------
+@app.get("/debug-info")
+def debug_info():
+    return {
+        "CLIENT_ID": CLIENT_ID,
+        "REDIRECT_URI": REDIRECT_URI,
+        "ACCESS_TOKEN_SET": True if ACCESS_TOKEN else False
     }
-    """
-    body = request.get_json(silent=True) or {}
-
-    symbol = body.get("symbol")
-    resolution = body.get("resolution", "15")
-    date_format = body.get("date_format", 1)
-    range_from = body.get("range_from")
-    range_to = body.get("range_to")
-    cont_flag = body.get("cont_flag", "1")
-
-    if not symbol:
-        return jsonify({"ok": False, "error": "symbol required"}), 400
-    if range_from is None or range_to is None:
-        return jsonify({"ok": False, "error": "range_from and range_to required"}), 400
-
-    headers = get_auth_header()
-    if not headers:
-        return jsonify({"ok": False, "error": "Auth missing (check FYERS_CLIENT_ID / FYERS_ACCESS_TOKEN)"}), 400
-
-    url = f"{FYERS_DATA_BASE}/history"
-    params = {
-        "symbol": symbol,
-        "resolution": str(resolution),
-        "date_format": str(date_format),
-        "range_from": str(range_from),
-        "range_to": str(range_to),
-        "cont_flag": str(cont_flag),
-    }
-
-    try:
-        res = requests.get(url, headers=headers, params=params, timeout=5)
-        data = res.json()
-    except Exception as e:
-        return jsonify({"ok": False, "error": f"history API error: {e}"}), 500
-
-    return jsonify(data)
 
 
 # ----------------------------------------------------
@@ -205,7 +155,7 @@ def fyers_ohlc():
 # ----------------------------------------------------
 @app.get("/health")
 def health():
-  return jsonify({"ok": True})
+    return jsonify({"ok": True})
 
 
 # ----------------------------------------------------
