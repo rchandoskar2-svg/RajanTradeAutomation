@@ -16,6 +16,9 @@ REDIRECT_URI = os.getenv("FYERS_REDIRECT_URI")
 RESPONSE_TYPE = "code"
 GRANT_TYPE = "authorization_code"
 
+# 🔹 Fyers data base (LIVE data इथून येईल)
+FYERS_DATA_BASE = "https://api-t1.fyers.in/data"
+
 
 # ----------------------------------------------------
 # ROOT TEST
@@ -76,19 +79,26 @@ def fyers_redirect():
 
 
 # ----------------------------------------------------
-# PROFILE API (CORRECT URL)
+# HELPER: auth header for data APIs
+# ----------------------------------------------------
+def get_auth_header():
+    access_token = os.getenv("FYERS_ACCESS_TOKEN")
+    if not (CLIENT_ID and access_token):
+        return None
+    return {"Authorization": f"{CLIENT_ID}:{access_token}"}
+
+
+# ----------------------------------------------------
+# PROFILE API TEST (LIVE DATA CONFIRMATION)
 # ----------------------------------------------------
 @app.get("/fyers-profile")
 def fyers_profile():
 
-    ACCESS_TOKEN = os.getenv("FYERS_ACCESS_TOKEN")
+    headers = get_auth_header()
+    if not headers:
+        return {"ok": False, "error": "Access token or client id missing in Render ENV"}, 400
 
-    if not ACCESS_TOKEN:
-        return {"ok": False, "error": "Access token missing in Render ENV"}, 400
-
-    headers = {"Authorization": f"{CLIENT_ID}:{ACCESS_TOKEN}"}
-
-    # ✅ Correct V3 profile API (old one blocked)
+    # ✅ Correct api-t1 profile URL
     url = "https://api-t1.fyers.in/api/v3/profile"
 
     res = requests.get(url, headers=headers)
@@ -96,7 +106,7 @@ def fyers_profile():
     # FYERS sometimes returns HTML on failure
     try:
         return res.json()
-    except:
+    except Exception:
         return {
             "ok": False,
             "error": "Non-JSON response",
@@ -105,11 +115,97 @@ def fyers_profile():
 
 
 # ----------------------------------------------------
+# FYERS QUOTE (LIVE LTP + VOLUME + %CHG)
+# ----------------------------------------------------
+@app.post("/fyers-quote")
+def fyers_quote():
+    """
+    Expected JSON:
+    {
+      "symbols": ["NSE:SBIN-EQ", "NSE:RELIANCE-EQ"]
+    }
+    """
+    body = request.get_json(silent=True) or {}
+    symbols = body.get("symbols")
+
+    if not symbols or not isinstance(symbols, list):
+        return jsonify({"ok": False, "error": "symbols list required"}), 400
+
+    headers = get_auth_header()
+    if not headers:
+        return jsonify({"ok": False, "error": "Auth missing (check FYERS_CLIENT_ID / FYERS_ACCESS_TOKEN)"}), 400
+
+    symbol_str = ",".join(symbols)
+    url = f"{FYERS_DATA_BASE}/quotes"
+
+    try:
+        res = requests.get(url, headers=headers, params={"symbols": symbol_str}, timeout=5)
+        data = res.json()
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"quote API error: {e}"}), 500
+
+    return jsonify(data)
+
+
+# ----------------------------------------------------
+# FYERS OHLC / HISTORY (15m / 1h / Daily candles)
+# ----------------------------------------------------
+@app.post("/fyers-ohlc")
+def fyers_ohlc():
+    """
+    Expected JSON:
+    {
+      "symbol": "NSE:SBIN-EQ",
+      "resolution": "15",          # "1","3","5","15","30","60","240","D"
+      "date_format": 1,            # 0 = epoch, 1 = yyyy-mm-dd
+      "range_from": "2025-11-25",  # depending on date_format
+      "range_to":   "2025-11-25",
+      "cont_flag": "1"
+    }
+    """
+    body = request.get_json(silent=True) or {}
+
+    symbol = body.get("symbol")
+    resolution = body.get("resolution", "15")
+    date_format = body.get("date_format", 1)
+    range_from = body.get("range_from")
+    range_to = body.get("range_to")
+    cont_flag = body.get("cont_flag", "1")
+
+    if not symbol:
+        return jsonify({"ok": False, "error": "symbol required"}), 400
+    if range_from is None or range_to is None:
+        return jsonify({"ok": False, "error": "range_from and range_to required"}), 400
+
+    headers = get_auth_header()
+    if not headers:
+        return jsonify({"ok": False, "error": "Auth missing (check FYERS_CLIENT_ID / FYERS_ACCESS_TOKEN)"}), 400
+
+    url = f"{FYERS_DATA_BASE}/history"
+    params = {
+        "symbol": symbol,
+        "resolution": str(resolution),
+        "date_format": str(date_format),
+        "range_from": str(range_from),
+        "range_to": str(range_to),
+        "cont_flag": str(cont_flag),
+    }
+
+    try:
+        res = requests.get(url, headers=headers, params=params, timeout=5)
+        data = res.json()
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"history API error: {e}"}), 500
+
+    return jsonify(data)
+
+
+# ----------------------------------------------------
 # HEALTH CHECK
 # ----------------------------------------------------
 @app.get("/health")
 def health():
-    return jsonify({"ok": True})
+  return jsonify({"ok": True})
 
 
 # ----------------------------------------------------
