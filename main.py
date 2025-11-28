@@ -1,144 +1,160 @@
 from flask import Flask, request, jsonify
 import requests
 import os
+import json
+from urllib.parse import parse_qs
 
 app = Flask(__name__)
 
-# -----------------------------
-# ENVIRONMENT VARIABLES
-# -----------------------------
-CHARTINK_TOKEN = os.getenv("CHARTINK_TOKEN")
+# -----------------------------------------------------------------
+# ENV
+# -----------------------------------------------------------------
 WEBAPP_URL = os.getenv("WEBAPP_URL")
 FYERS_ACCESS_TOKEN = os.getenv("FYERS_ACCESS_TOKEN")
-
 FYERS_QUOTES_URL = "https://api.fyers.in/data-rest/v3/quotes/"
 
-# -----------------------------
+# -----------------------------------------------------------------
 # TELEGRAM
-# -----------------------------
-def send_telegram(msg: str):
+# -----------------------------------------------------------------
+def send_telegram(msg):
     try:
         bot = os.getenv("TELEGRAM_BOT_TOKEN")
         chat = os.getenv("TELEGRAM_CHAT_ID")
         if not bot or not chat:
             return
-        url = f"https://api.telegram.org/bot{bot}/sendMessage"
-        payload = {"chat_id": chat, "text": msg, "parse_mode": "HTML"}
-        requests.post(url, json=payload, timeout=5)
+        requests.post(
+            f"https://api.telegram.org/bot{bot}/sendMessage",
+            json={"chat_id": chat, "text": msg},
+            timeout=5
+        )
     except Exception as e:
         print("Telegram error:", e)
 
 
-# -----------------------------
-# FYERS QUOTES FETCH (ONE-TIME)
-# -----------------------------
+# -----------------------------------------------------------------
+# FYERS QUOTES (ONE TIME)
+# -----------------------------------------------------------------
 def fetch_fyers_quotes(symbols):
     if not symbols:
         return {}
 
     if not FYERS_ACCESS_TOKEN:
-        print("FYERS_ACCESS_TOKEN not set")
+        print("NO FYERS TOKEN")
         return {}
 
-    headers = {
-        "Authorization": f"Bearer {FYERS_ACCESS_TOKEN}"
-    }
+    headers = {"Authorization": f"Bearer {FYERS_ACCESS_TOKEN}"}
 
     try:
         joined = ",".join(symbols)
-        params = {"symbols": joined}
-
-        resp = requests.get(FYERS_QUOTES_URL, headers=headers, params=params, timeout=5)
-        resp.raise_for_status()
-        data = resp.json()
+        r = requests.get(
+            FYERS_QUOTES_URL,
+            headers=headers,
+            params={"symbols": joined},
+            timeout=5,
+        )
+        data = r.json()
 
         if data.get("s") != "ok":
-            print("Fyers response not ok:", data)
+            print("Fyers NOT OK:", data)
             return {}
 
         out = {}
-        for item in data.get("d", []):
-            sym = item.get("n")
-            v = item.get("v", {}) or {}
-            if not sym:
-                continue
-
+        for it in data.get("d", []):
+            sym = it.get("n")
+            v = it.get("v", {}) or {}
             out[sym] = {
                 "price": v.get("lp"),
                 "volume": v.get("v"),
                 "percent_change": v.get("chp"),
             }
-
         return out
 
     except Exception as e:
-        print("Fyers fetch error:", e)
+        print("Fyers error:", e)
         return {}
 
 
-# -----------------------------
-# INTERNAL HANDLER FOR CHARTINK
-# -----------------------------
+# -----------------------------------------------------------------
+# CHARTINK HANDLER (FINAL ROBUST VERSION)
+# -----------------------------------------------------------------
 def _handle_chartink_alert():
     try:
-        data = request.get_json(force=True) or {}
+        raw = request.get_data(as_text=True) or ""
+        data = {}
 
-        # ------------------------
-        # FIX: Read Chartink STOCKS
-        # ------------------------
+        # 1) JSON म्हणून try करा
+        try:
+            data = json.loads(raw)
+        except:
+            pass
+
+        # 2) नसल्यास fallback (stocks=...&trigger_prices=...)
+        if not isinstance(data, dict) or not data:
+            try:
+                parsed = parse_qs(raw)
+                if "stocks" in parsed:
+                    data["stocks"] = parsed["stocks"][0]
+                if "trigger_prices" in parsed:
+                    data["trigger_prices"] = parsed["trigger_prices"][0]
+            except Exception as e:
+                print("Parse fallback error:", e)
+
+        # -----------------------------
+        # extract symbols
+        # -----------------------------
         symbols = data.get("symbols") or []
 
-        if (not symbols) and ("stocks" in data):
-            raw = data["stocks"]
-            if isinstance(raw, str):
-                symbols = [s.strip() for s in raw.split(",") if s.strip()]
+        if not symbols and "stocks" in data:
+            raw_s = data.get("stocks", "")
+            symbols = [x.strip() for x in raw_s.split(",") if x.strip()]
 
         # Telegram
         if symbols:
             send_telegram("🚀 Chartink Alert Received → " + ", ".join(symbols))
 
-        # Forward raw payload to Sheets WebApp
+        # Forward to Sheets WebApp
         if WEBAPP_URL:
-            requests.post(WEBAPP_URL, json=data, timeout=5)
+            try:
+                requests.post(WEBAPP_URL, json=data, timeout=5)
+            except Exception as e:
+                print("Forward error:", e)
 
+        # IMPORTANT:
+        # Chartink ला नेहमी 200 दे → 500 NO MORE.
         return jsonify({"status": "ok"})
 
     except Exception as e:
-        print("chartink handler error:", e)
-        send_telegram(f"Chartink handler error: {e}")
-        return jsonify({"status": "error"}), 500
+        print("CHARTINK FINAL ERROR:", e)
+        # STILL RETURN 200 (NEVER 500)
+        return jsonify({"status": "ok"})
 
 
-# PUBLIC ROUTES
+# -----------------------------------------------------------------
+# ROUTES
+# -----------------------------------------------------------------
 @app.route("/chartink", methods=["POST"])
 def chartink():
     return _handle_chartink_alert()
 
 @app.route("/chartink-alert", methods=["POST"])
-def chartink_legacy():
+def chartink_alert():
     return _handle_chartink_alert()
 
-
-# -----------------------------
-# API: FYERS QUOTES
-# -----------------------------
 @app.route("/api/fyers-quotes", methods=["POST"])
-def api_fyers_quotes():
+def fyers_quotes():
     try:
         payload = request.get_json(force=True) or {}
         symbols = payload.get("symbols") or []
-
-        quotes = fetch_fyers_quotes(symbols)
-
-        return jsonify({"success": True, "data": quotes})
+        data = fetch_fyers_quotes(symbols)
+        return jsonify({"success": True, "data": data})
     except Exception as e:
-        print("/api/fyers-quotes error:", e)
-        return jsonify({"success": False, "error": "internal error"}), 500
+        print("Fyers quotes route error:", e)
+        return jsonify({"success": False}), 200
 
 
 @app.route("/")
 def home():
-    return "RajanTradeAutomation Backend Active."
+    return "RajanTradeAutomation Backend ACTIVE."
 
 
 if __name__ == "__main__":
