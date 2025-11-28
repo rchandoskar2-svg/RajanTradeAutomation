@@ -33,10 +33,6 @@ def send_telegram(msg: str):
 # FYERS QUOTES FETCH (ONE-TIME)
 # -----------------------------
 def fetch_fyers_quotes(symbols):
-    """
-    symbols: ["NSE:SBIN-EQ", "NSE:TCS-EQ", ...]
-    returns: { "NSE:SBIN-EQ": {"price": .., "volume": .., "percent_change": ..}, ... }
-    """
     if not symbols:
         return {}
 
@@ -81,16 +77,56 @@ def fetch_fyers_quotes(symbols):
 
 
 # -----------------------------
-# API: Apps Script -> Fyers Quotes
+# INTERNAL HANDLER FOR CHARTINK
+# -----------------------------
+def _handle_chartink_alert():
+    try:
+        data = request.get_json(force=True) or {}
+
+        # ------------------------
+        # FIX: Read Chartink STOCKS
+        # ------------------------
+        symbols = data.get("symbols") or []
+
+        if (not symbols) and ("stocks" in data):
+            raw = data["stocks"]
+            if isinstance(raw, str):
+                symbols = [s.strip() for s in raw.split(",") if s.strip()]
+
+        # Telegram
+        if symbols:
+            send_telegram("🚀 Chartink Alert Received → " + ", ".join(symbols))
+
+        # Forward raw payload to Sheets WebApp
+        if WEBAPP_URL:
+            requests.post(WEBAPP_URL, json=data, timeout=5)
+
+        return jsonify({"status": "ok"})
+
+    except Exception as e:
+        print("chartink handler error:", e)
+        send_telegram(f"Chartink handler error: {e}")
+        return jsonify({"status": "error"}), 500
+
+
+# PUBLIC ROUTES
+@app.route("/chartink", methods=["POST"])
+def chartink():
+    return _handle_chartink_alert()
+
+@app.route("/chartink-alert", methods=["POST"])
+def chartink_legacy():
+    return _handle_chartink_alert()
+
+
+# -----------------------------
+# API: FYERS QUOTES
 # -----------------------------
 @app.route("/api/fyers-quotes", methods=["POST"])
 def api_fyers_quotes():
     try:
         payload = request.get_json(force=True) or {}
         symbols = payload.get("symbols") or []
-
-        if not isinstance(symbols, list) or not symbols:
-            return jsonify({"success": False, "error": "symbols list required"}), 400
 
         quotes = fetch_fyers_quotes(symbols)
 
@@ -100,66 +136,6 @@ def api_fyers_quotes():
         return jsonify({"success": False, "error": "internal error"}), 500
 
 
-# -----------------------------
-# INTERNAL HANDLER: CHARTINK ALERT
-# -----------------------------
-def _handle_chartink_alert():
-    """
-    Common logic for /chartink and /chartink-alert
-    """
-    try:
-        data = request.get_json(force=True) or {}
-        symbols = data.get("symbols") or []
-
-        # Telegram log
-        if symbols:
-            send_telegram("🚀 Chartink Alert Received → " + ", ".join(symbols))
-
-        # Forward raw body to Google Apps Script (WEBAPP_URL)
-        if WEBAPP_URL:
-            try:
-                requests.post(WEBAPP_URL, json=data, timeout=5)
-            except Exception as e:
-                print("Error forwarding to WebApp:", e)
-
-        return jsonify({"status": "ok"})
-    except Exception as e:
-        print("chartink handler error:", e)
-        send_telegram(f"Chartink handler error: {e}")
-        return jsonify({"status": "error"}), 500
-
-
-# -----------------------------
-# PUBLIC ROUTES FOR CHARTINK
-# -----------------------------
-@app.route("/chartink", methods=["POST"])
-def chartink():
-    return _handle_chartink_alert()
-
-
-@app.route("/chartink-alert", methods=["POST"])
-def chartink_legacy():
-    # Backward compatible route (Chartink अजून इथेच येत आहे)
-    return _handle_chartink_alert()
-
-
-# -----------------------------
-# FYERS REDIRECT (AUTH)
-# -----------------------------
-@app.route("/fyers-redirect")
-def fyers_redirect():
-    try:
-        auth_code = request.args.get("auth_code")
-        send_telegram(f"Auth Code Received:\n{auth_code}")
-        return "OK"
-    except Exception as e:
-        print("fyers-redirect error:", e)
-        return "ERR"
-
-
-# -----------------------------
-# ROOT
-# -----------------------------
 @app.route("/")
 def home():
     return "RajanTradeAutomation Backend Active."
