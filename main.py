@@ -1,18 +1,19 @@
 """
-RajanTradeAutomation - Kushal Strategy Server (v1.2)
+RajanTradeAutomation - Kushal Strategy Server (v1.3)
 Flask server on Render:
-- /            : Info
-- /health      : UptimeRobot ping (keeps free tier awake)
-- /fyers-auth  : Generate Fyers auth URL (manual use)
-- /fyers-redirect : Exchange auth_code -> access/refresh token (manual)
-- /fyers-profile  : Quick test using current ACCESS_TOKEN
-- /test_symbol    : Test quotes API for any symbol
-- /run_strategy   : Placeholder for main Kushal Sector FnO logic
+- /              : Info
+- /health        : UptimeRobot ping (keeps free tier awake)
+- /fyers-auth    : Generate Fyers auth URL (manual use)
+- /fyers-redirect: Exchange auth_code -> access/refresh token (manual)
+- /fyers-profile : Quick test using current ACCESS_TOKEN
+- /test_symbol   : Test quotes API for any symbol
+- /run_strategy  : Step-1 -> POST test payload to Google WebApp
 """
 
 import os
 import json
 import urllib.parse
+from datetime import datetime
 
 from flask import Flask, request, jsonify
 import requests
@@ -68,7 +69,6 @@ def health():
 
 # ----------------------------------------------------
 # ----------- FYERS AUTH / TOKEN ROUTES --------------
-# (used rarely, mainly when token expires)
 # ----------------------------------------------------
 @app.get("/fyers-auth")
 def fyers_auth():
@@ -117,7 +117,6 @@ def fyers_redirect():
 
     # NOTE: Response मध्ये access_token / refresh_token येतो.
     # हे Render env मध्ये manually अपडेट करावे लागतील.
-    # पुढे auto-refresh हवं असेल तर वेगळा route बनवू.
     return jsonify(response)
 
 
@@ -145,7 +144,7 @@ def fyers_profile():
 
 
 # ----------------------------------------------------
-# ----------- TEST SYMBOL ROUTE (QUOTES) ------------
+# ----------- TEST SYMBOL ROUTE (QUOTES) -------------
 # ----------------------------------------------------
 @app.get("/test_symbol")
 def test_symbol():
@@ -189,33 +188,62 @@ def test_symbol():
 
 
 # ----------------------------------------------------
-# ----------- MAIN STRATEGY ROUTE (Placeholder) ------
+# ----------- MAIN STRATEGY ROUTE (STEP-1) -----------
 # ----------------------------------------------------
 @app.post("/run_strategy")
 def run_strategy():
     """
-    इथे पुढे Kushal Varshney Sector FnO Strategy logic येईल:
-    - Nifty 50 adv/decl + sector performance (via Fyers)
-    - FnO stock list filter (<= 2.5% move)
-    - 5-min candles (WebSocket/REST) + lowest volume candle logic
-    - Entry always in Cash; universe = FnO list
-    - Signals Sheets/WebApp कडे पाठवणे (WEBAPP_URL ला POST करून)
-
-    सध्या हा फक्त dummy response देतो.
+    Step-1: फक्त Google WebApp कडे टेस्ट payload POST करतो.
+    - नंतर इथे full Kushal Sector FnO Strategy logic येईल.
     """
-    payload = {}
+    now_ist = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+
+    # Incoming payload (जर काही असेल तर)
+    incoming = {}
     try:
         if request.data:
-            payload = json.loads(request.data.decode("utf-8"))
+            incoming = json.loads(request.data.decode("utf-8"))
     except Exception:
-        payload = {}
+        incoming = {}
+
+    if not WEBAPP_URL:
+        return jsonify({
+            "ok": False,
+            "error": "WEBAPP_URL not configured in env",
+            "mode": MODE
+        }), 500
+
+    # WebApp.gs साठी simple test payload
+    webapp_payload = {
+        "action": "TEST_RUN",
+        "mode": MODE,
+        "trigger_time": now_ist,
+        "note": "Dry-run from Render /run_strategy (Step-1)",
+        "incoming": incoming
+    }
+
+    forward_status = None
+    forward_body = None
+
+    try:
+        res = requests.post(
+            WEBAPP_URL,
+            json=webapp_payload,
+            timeout=10
+        )
+        forward_status = res.status_code
+        forward_body = res.text
+    except Exception as e:
+        forward_status = -1
+        forward_body = str(e)
 
     return jsonify({
         "ok": True,
-        "msg": "Strategy placeholder running",
         "mode": MODE,
         "interval_secs": INTERVAL_SECS,
-        "request_payload": payload
+        "webapp_url_present": bool(WEBAPP_URL),
+        "webapp_forward_status": forward_status,
+        "webapp_forward_body": forward_body
     }), 200
 
 
