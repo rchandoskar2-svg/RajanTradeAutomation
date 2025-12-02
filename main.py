@@ -1,10 +1,12 @@
 """
-RajanTradeAutomation - Kushal Strategy Server (v1.1)
+RajanTradeAutomation - Kushal Strategy Server (v1.2)
 Flask server on Render:
-- /health         : UptimeRobot ping (keeps free tier awake)
-- /fyers-auth     : Generate Fyers auth URL (manual use)
+- /            : Info
+- /health      : UptimeRobot ping (keeps free tier awake)
+- /fyers-auth  : Generate Fyers auth URL (manual use)
 - /fyers-redirect : Exchange auth_code -> access/refresh token (manual)
 - /fyers-profile  : Quick test using current ACCESS_TOKEN
+- /test_symbol    : Test quotes API for any symbol
 - /run_strategy   : Placeholder for main Kushal Sector FnO logic
 """
 
@@ -30,7 +32,7 @@ REFRESH_TOKEN = os.getenv("FYERS_REFRESH_TOKEN", "").strip()
 WEBAPP_URL = os.getenv("WEBAPP_URL", "").strip()   # Google Apps Script exec URL
 MODE = os.getenv("MODE", "SIM").strip()            # SIM / LIVE (future use)
 
-# तुझ्या Render env मधील INTERVAL_SECS default 1800 आहे (30 मिनिटे)
+# Render env मधील INTERVAL_SECS default 1800 (30 मिनिटे)
 try:
     INTERVAL_SECS = int(os.getenv("INTERVAL_SECS", "1800").strip() or "1800")
 except Exception:
@@ -47,7 +49,7 @@ GRANT_TYPE = "authorization_code"
 def home():
     return (
         "RajanTradeAutomation ACTIVE ✔<br>"
-        "Routes: /health /fyers-auth /fyers-profile /run_strategy"
+        "Routes: /health /fyers-auth /fyers-profile /test_symbol /run_strategy"
     )
 
 
@@ -123,7 +125,7 @@ def fyers_redirect():
 def fyers_profile():
     """
     Quick test: current ACCESS_TOKEN वापरून profile call.
-    Token expire झाला असेल तर error येईल.
+    Token expire झाला असेल किंवा server down असेल तर error येईल.
     """
     if not ACCESS_TOKEN or not CLIENT_ID:
         return {"ok": False, "error": "Access Token or Client ID Missing"}, 400
@@ -143,6 +145,50 @@ def fyers_profile():
 
 
 # ----------------------------------------------------
+# ----------- TEST SYMBOL ROUTE (QUOTES) ------------
+# ----------------------------------------------------
+@app.get("/test_symbol")
+def test_symbol():
+    """
+    Test Fyers market data for any symbol.
+    Examples:
+      /test_symbol?symbol=MCX:NATURALGAS24DECFUT
+      /test_symbol?symbol=NSE:NIFTY50-INDEX
+      /test_symbol?symbol=NSE:RELIANCE-EQ
+    FnO watchlist साठी symbols इथे तपासता येतील.
+    """
+    symbol = request.args.get("symbol", "").strip()
+    if not symbol:
+        return jsonify({"ok": False, "error": "symbol param missing"}), 400
+
+    if not ACCESS_TOKEN or not CLIENT_ID:
+        return jsonify({"ok": False, "error": "Access Token or Client ID Missing"}), 400
+
+    headers = {"Authorization": f"{CLIENT_ID}:{ACCESS_TOKEN}"}
+    url = "https://api.fyers.in/data-rest/v2/quotes/"
+    params = {"symbols": symbol}
+
+    try:
+        res = requests.get(url, headers=headers, params=params, timeout=10)
+        try:
+            data = res.json()
+        except Exception:
+            data = {"raw": res.text}
+        return jsonify({
+            "ok": True,
+            "symbol": symbol,
+            "status_code": res.status_code,
+            "data": data
+        }), 200
+    except Exception as e:
+        return jsonify({
+            "ok": False,
+            "symbol": symbol,
+            "error": str(e)
+        }), 500
+
+
+# ----------------------------------------------------
 # ----------- MAIN STRATEGY ROUTE (Placeholder) ------
 # ----------------------------------------------------
 @app.post("/run_strategy")
@@ -152,6 +198,7 @@ def run_strategy():
     - Nifty 50 adv/decl + sector performance (via Fyers)
     - FnO stock list filter (<= 2.5% move)
     - 5-min candles (WebSocket/REST) + lowest volume candle logic
+    - Entry always in Cash; universe = FnO list
     - Signals Sheets/WebApp कडे पाठवणे (WEBAPP_URL ला POST करून)
 
     सध्या हा फक्त dummy response देतो.
