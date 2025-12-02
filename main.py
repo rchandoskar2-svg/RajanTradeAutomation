@@ -1,5 +1,5 @@
 """
-RajanTradeAutomation - Kushal Strategy Server (v1.3)
+RajanTradeAutomation - Kushal Strategy Server (v1.4)
 Flask server on Render:
 - /              : Info
 - /health        : UptimeRobot ping (keeps free tier awake)
@@ -7,7 +7,7 @@ Flask server on Render:
 - /fyers-redirect: Exchange auth_code -> access/refresh token (manual)
 - /fyers-profile : Quick test using current ACCESS_TOKEN
 - /test_symbol   : Test quotes API for any symbol
-- /run_strategy  : Step-1 -> POST test payload to Google WebApp
+- /run_strategy  : Step-2 -> Demo Chartink-style payload to Google WebApp
 """
 
 import os
@@ -114,9 +114,6 @@ def fyers_redirect():
 
     session.set_token(auth_code)
     response = session.generate_token()
-
-    # NOTE: Response मध्ये access_token / refresh_token येतो.
-    # हे Render env मध्ये manually अपडेट करावे लागतील.
     return jsonify(response)
 
 
@@ -188,23 +185,17 @@ def test_symbol():
 
 
 # ----------------------------------------------------
-# ----------- MAIN STRATEGY ROUTE (STEP-1) -----------
+# ----------- MAIN STRATEGY ROUTE (STEP-2) -----------
 # ----------------------------------------------------
 @app.post("/run_strategy")
 def run_strategy():
     """
-    Step-1: फक्त Google WebApp कडे टेस्ट payload POST करतो.
-    - नंतर इथे full Kushal Sector FnO Strategy logic येईल.
+    Step-2 demo:
+    - Fixed Chartink-style payload WebApp.gs कडे पाठवतो
+      जेणेकरून BuyList मध्ये rows add होतात का ते तपासता येईल.
+    - नंतर इथे full Kushal Sector FnO logic येईल.
     """
     now_ist = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
-
-    # Incoming payload (जर काही असेल तर)
-    incoming = {}
-    try:
-        if request.data:
-            incoming = json.loads(request.data.decode("utf-8"))
-    except Exception:
-        incoming = {}
 
     if not WEBAPP_URL:
         return jsonify({
@@ -213,13 +204,13 @@ def run_strategy():
             "mode": MODE
         }), 500
 
-    # WebApp.gs साठी simple test payload
+    # Chartink-style demo payload (stocks + trigger_prices अनिवार्य)
     webapp_payload = {
-        "action": "TEST_RUN",
-        "mode": MODE,
-        "trigger_time": now_ist,
-        "note": "Dry-run from Render /run_strategy (Step-1)",
-        "incoming": incoming
+        "stocks": "RELIANCE,ICICIBANK,HDFCBANK",
+        "trigger_prices": "2800,950,1600",
+        "triggered_at": now_ist,
+        "scan_name": f"DEMO_KUSHAL_{MODE}",
+        "source": "RajanTradeAutomation_demo"
     }
 
     forward_status = None
@@ -242,6 +233,7 @@ def run_strategy():
         "mode": MODE,
         "interval_secs": INTERVAL_SECS,
         "webapp_url_present": bool(WEBAPP_URL),
+        "demo_payload": webapp_payload,
         "webapp_forward_status": forward_status,
         "webapp_forward_body": forward_body
     }), 200
