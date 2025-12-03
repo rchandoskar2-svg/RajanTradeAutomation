@@ -3,7 +3,7 @@ import os
 import requests
 import json
 import urllib.parse
-from fyers_apiv3 import fyersModel
+from fyers_apiv3 import fyersModel   # हे आधीच होतं, तसेच ठेवा
 
 app = Flask(__name__)
 
@@ -32,7 +32,7 @@ GRANT_TYPE = "authorization_code"
 def home():
     return (
         "RajanTradeAutomation ACTIVE ✔<br>"
-        "Routes: /fyers-auth /fyers-profile /chartink-alert"
+        "Routes: /fyers-auth /fyers-profile /chartink-alert /health"
     )
 
 
@@ -73,17 +73,24 @@ def fyers_redirect():
 
 @app.get("/fyers-profile")
 def fyers_profile():
-    if not ACCESS_TOKEN:
-        return {"ok": False, "error": "Access Token Missing"}, 400
+    """
+    current ACCESS_TOKEN वापरून Fyers profile API test.
+    """
+    if not ACCESS_TOKEN or not CLIENT_ID:
+        return jsonify({"ok": False, "error": "Access Token or Client ID Missing"}), 400
 
     headers = {"Authorization": f"{CLIENT_ID}:{ACCESS_TOKEN}"}
     url = "https://api.fyers.in/api/v3/profile"
 
-    res = requests.get(url, headers=headers)
     try:
-        return res.json()
-    except Exception:
-        return {"ok": False, "error": "Non-JSON", "raw": res.text}
+        res = requests.get(url, headers=headers, timeout=10)
+        try:
+            data = res.json()
+        except Exception:
+            data = {"raw": res.text}
+        return jsonify({"status_code": res.status_code, "data": data})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
 
 
 # ----------------------------------------------------
@@ -91,10 +98,13 @@ def fyers_profile():
 # ----------------------------------------------------
 @app.post("/debug-chartink")
 def debug_chartink():
-    print("\n\n========== RAW CHARTINK ALERT (DEBUG) ==========")
+    print("
+
+========== RAW CHARTINK ALERT (DEBUG) ==========")
     print("Headers:", dict(request.headers))
     print("Body:", request.data.decode(errors="ignore"))
-    print("===============================================\n")
+    print("===============================================
+")
     return {"ok": True, "msg": "debug logged"}, 200
 
 
@@ -105,17 +115,10 @@ def debug_chartink():
 def chartink_alert():
     """
     Chartink webhook endpoint.
-
-    - Some calls may be simple GET (health / initial ping)
-    - Actual alerts come as POST with JSON body:
-      {
-        "stocks": "TCS,INFY,SBIN",
-        "trigger_prices": "3565.1,1540.25,585.75",
-        "triggered_at": "12:15 pm",
-        "scan_name": "ROCKET RAJAN"
-      }
     """
-    print("\n\n====== CHARTINK ALERT HIT ======")
+    print("
+
+====== CHARTINK ALERT HIT ======")
     print("Method:", request.method)
     print("Query args:", dict(request.args))
 
@@ -128,7 +131,8 @@ def chartink_alert():
     # ---- Handle GET pings gracefully ----
     if request.method == "GET":
         print("GET ping received on /chartink-alert → returning pong")
-        print("============================================\n")
+        print("============================================
+")
         return {"ok": True, "msg": "pong"}, 200
 
     # ---- POST: actual alert from Chartink ----
@@ -146,7 +150,8 @@ def chartink_alert():
     # Safety: must contain at least "stocks" key
     if not isinstance(data, dict) or "stocks" not in data:
         print("❌ Invalid payload structure, 'stocks' missing")
-        print("============================================\n")
+        print("============================================
+")
         return {"ok": False, "error": "Invalid payload (no stocks)"}, 400
 
     # ---- Forward directly to Google Apps Script WebApp ----
@@ -166,10 +171,12 @@ def chartink_alert():
 
     except Exception as e:
         print("❌ FORWARD ERROR:", str(e))
-        print("============================================\n")
+        print("============================================
+")
         return {"ok": False, "error": "Forward failed"}, 500
 
-    print("====== CHARTINK ALERT PROCESSED SUCCESSFULLY ======\n")
+    print("====== CHARTINK ALERT PROCESSED SUCCESSFULLY ======
+")
     return {"ok": True}, 200
 
 
@@ -182,7 +189,7 @@ def health():
 
 
 # ----------------------------------------------------
-# RUN SERVER
+# RUN SERVER  (ping / keep-alive भाग - नको काढू)
 # ----------------------------------------------------
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=10000)
