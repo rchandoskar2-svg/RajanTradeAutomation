@@ -1,83 +1,46 @@
-"""
-RajanTradeAutomation - Kushal Strategy Server (v1.4)
-Flask server on Render:
-- /              : Info
-- /health        : UptimeRobot ping (keeps free tier awake)
-- /fyers-auth    : Generate Fyers auth URL (manual use)
-- /fyers-redirect: Exchange auth_code -> access/refresh token (manual)
-- /fyers-profile : Quick test using current ACCESS_TOKEN
-- /test_symbol   : Test quotes API for any symbol
-- /run_strategy  : Step-2 -> Demo Chartink-style payload to Google WebApp
-"""
-
+from flask import Flask, request, jsonify
 import os
+import requests
 import json
 import urllib.parse
-from datetime import datetime
-
-from flask import Flask, request, jsonify
-import requests
 from fyers_apiv3 import fyersModel
 
 app = Flask(__name__)
 
 # ----------------------------------------------------
-# ENV VARIABLES (exact keys as in Render)
+# ENV VARIABLES
 # ----------------------------------------------------
-CLIENT_ID = os.getenv("FYERS_CLIENT_ID", "").strip()
-SECRET_KEY = os.getenv("FYERS_SECRET_KEY", "").strip()
-REDIRECT_URI = os.getenv("FYERS_REDIRECT_URI", "").strip()
-ACCESS_TOKEN = os.getenv("FYERS_ACCESS_TOKEN", "").strip()
-REFRESH_TOKEN = os.getenv("FYERS_REFRESH_TOKEN", "").strip()
+CLIENT_ID = os.getenv("FYERS_CLIENT_ID")
+SECRET_KEY = os.getenv("FYERS_SECRET_KEY")
+REDIRECT_URI = os.getenv("FYERS_REDIRECT_URI")
+ACCESS_TOKEN = os.getenv("FYERS_ACCESS_TOKEN")
 
-WEBAPP_URL = os.getenv("WEBAPP_URL", "").strip()   # Google Apps Script exec URL
-MODE = os.getenv("MODE", "SIM").strip()            # SIM / LIVE (future use)
+# Your Google Apps Script EXEC URL
+WEBAPP_URL = os.getenv("WEBAPP_URL", "").strip()
 
-# Render env मधील INTERVAL_SECS default 1800 (30 मिनिटे)
-try:
-    INTERVAL_SECS = int(os.getenv("INTERVAL_SECS", "1800").strip() or "1800")
-except Exception:
-    INTERVAL_SECS = 1800
+# Chartink secret token (same as in webhook URL)
+CHARTINK_TOKEN = os.getenv("CHARTINK_TOKEN", "").strip()
 
 RESPONSE_TYPE = "code"
 GRANT_TYPE = "authorization_code"
 
 
 # ----------------------------------------------------
-# ROOT + HEALTH (UptimeRobot)
+# ROOT
 # ----------------------------------------------------
 @app.get("/")
 def home():
     return (
         "RajanTradeAutomation ACTIVE ✔<br>"
-        "Routes: /health /fyers-auth /fyers-profile /test_symbol /run_strategy"
+        "Routes: /fyers-auth /fyers-profile /chartink-alert"
     )
 
 
-@app.get("/health")
-def health():
-    """
-    Simple health check for UptimeRobot.
-    Just returns ok so that Render free tier stays awake.
-    """
-    return {
-        "ok": True,
-        "mode": MODE,
-        "interval_secs": INTERVAL_SECS
-    }, 200
-
-
 # ----------------------------------------------------
-# ----------- FYERS AUTH / TOKEN ROUTES --------------
+# ----------- FYERS AUTH FLOW ------------------------
 # ----------------------------------------------------
 @app.get("/fyers-auth")
 def fyers_auth():
-    """
-    Generate auth URL (manual use in browser).
-    """
-    if not CLIENT_ID or not REDIRECT_URI:
-        return jsonify({"error": "Missing CLIENT_ID or REDIRECT_URI"}), 500
-
     encoded_redirect = urllib.parse.quote(REDIRECT_URI, safe="")
     url = (
         "https://api-t1.fyers.in/api/v3/generate-authcode?"
@@ -91,18 +54,9 @@ def fyers_auth():
 
 @app.get("/fyers-redirect")
 def fyers_redirect():
-    """
-    Redirect URI endpoint.
-    Fyers will call this once you approve the app.
-    It exchanges auth_code for access_token + refresh_token.
-    (Mostly for manual use / debugging)
-    """
     auth_code = request.args.get("auth_code") or request.args.get("code")
     if not auth_code:
         return {"error": "No auth code"}, 400
-
-    if not (CLIENT_ID and SECRET_KEY and REDIRECT_URI):
-        return {"error": "Missing CLIENT_ID / SECRET_KEY / REDIRECT_URI"}, 500
 
     session = fyersModel.SessionModel(
         client_id=CLIENT_ID,
@@ -119,121 +73,116 @@ def fyers_redirect():
 
 @app.get("/fyers-profile")
 def fyers_profile():
-    """
-    Quick test: current ACCESS_TOKEN वापरून profile call.
-    Token expire झाला असेल किंवा server down असेल तर error येईल.
-    """
-    if not ACCESS_TOKEN or not CLIENT_ID:
-        return {"ok": False, "error": "Access Token or Client ID Missing"}, 400
+    if not ACCESS_TOKEN:
+        return {"ok": False, "error": "Access Token Missing"}, 400
 
     headers = {"Authorization": f"{CLIENT_ID}:{ACCESS_TOKEN}"}
     url = "https://api.fyers.in/api/v3/profile"
 
+    res = requests.get(url, headers=headers)
     try:
-        res = requests.get(url, headers=headers, timeout=10)
-        try:
-            data = res.json()
-        except Exception:
-            data = {"raw": res.text}
-        return jsonify({"status_code": res.status_code, "data": data})
-    except Exception as e:
-        return jsonify({"ok": False, "error": str(e)}), 500
+        return res.json()
+    except Exception:
+        return {"ok": False, "error": "Non-JSON", "raw": res.text}
 
 
 # ----------------------------------------------------
-# ----------- TEST SYMBOL ROUTE (QUOTES) -------------
+# ----------- CHARTINK DEBUG ROUTE -------------------
 # ----------------------------------------------------
-@app.get("/test_symbol")
-def test_symbol():
+@app.post("/debug-chartink")
+def debug_chartink():
+    print("\n\n========== RAW CHARTINK ALERT (DEBUG) ==========")
+    print("Headers:", dict(request.headers))
+    print("Body:", request.data.decode(errors="ignore"))
+    print("===============================================\n")
+    return {"ok": True, "msg": "debug logged"}, 200
+
+
+# ----------------------------------------------------
+# ----------- MAIN CHARTINK ALERT ROUTE --------------
+# ----------------------------------------------------
+@app.route("/chartink-alert", methods=["GET", "POST"])
+def chartink_alert():
     """
-    Test Fyers market data for any symbol.
-    Examples:
-      /test_symbol?symbol=MCX:NATURALGAS24DECFUT
-      /test_symbol?symbol=NSE:NIFTY50-INDEX
-      /test_symbol?symbol=NSE:RELIANCE-EQ
-    FnO watchlist साठी symbols इथे तपासता येतील.
+    Chartink webhook endpoint.
+
+    - Some calls may be simple GET (health / initial ping)
+    - Actual alerts come as POST with JSON body:
+      {
+        "stocks": "TCS,INFY,SBIN",
+        "trigger_prices": "3565.1,1540.25,585.75",
+        "triggered_at": "12:15 pm",
+        "scan_name": "ROCKET RAJAN"
+      }
     """
-    symbol = request.args.get("symbol", "").strip()
-    if not symbol:
-        return jsonify({"ok": False, "error": "symbol param missing"}), 400
+    print("\n\n====== CHARTINK ALERT HIT ======")
+    print("Method:", request.method)
+    print("Query args:", dict(request.args))
 
-    if not ACCESS_TOKEN or not CLIENT_ID:
-        return jsonify({"ok": False, "error": "Access Token or Client ID Missing"}), 400
+    # ---- Token validation (query param) ----
+    incoming_token = request.args.get("token", "").strip()
+    if CHARTINK_TOKEN and incoming_token != CHARTINK_TOKEN:
+        print("❌ Invalid token:", incoming_token)
+        return {"ok": False, "error": "Invalid token"}, 403
 
-    headers = {"Authorization": f"{CLIENT_ID}:{ACCESS_TOKEN}"}
-    url = "https://api.fyers.in/data-rest/v2/quotes/"
-    params = {"symbols": symbol}
+    # ---- Handle GET pings gracefully ----
+    if request.method == "GET":
+        print("GET ping received on /chartink-alert → returning pong")
+        print("============================================\n")
+        return {"ok": True, "msg": "pong"}, 200
 
+    # ---- POST: actual alert from Chartink ----
     try:
-        res = requests.get(url, headers=headers, params=params, timeout=10)
-        try:
-            data = res.json()
-        except Exception:
-            data = {"raw": res.text}
-        return jsonify({
-            "ok": True,
-            "symbol": symbol,
-            "status_code": res.status_code,
-            "data": data
-        }), 200
+        body_raw = request.data.decode(errors="ignore")
+        print("RAW BODY:", body_raw or "[EMPTY]")
+
+        # Try JSON first
+        data = json.loads(body_raw) if body_raw else {}
+
     except Exception as e:
-        return jsonify({
-            "ok": False,
-            "symbol": symbol,
-            "error": str(e)
-        }), 500
+        print("❌ JSON parse error:", str(e))
+        return {"ok": False, "error": "Invalid JSON"}, 400
 
+    # Safety: must contain at least "stocks" key
+    if not isinstance(data, dict) or "stocks" not in data:
+        print("❌ Invalid payload structure, 'stocks' missing")
+        print("============================================\n")
+        return {"ok": False, "error": "Invalid payload (no stocks)"}, 400
 
-# ----------------------------------------------------
-# ----------- MAIN STRATEGY ROUTE (STEP-2) -----------
-# ----------------------------------------------------
-@app.post("/run_strategy")
-def run_strategy():
-    """
-    Step-2 demo:
-    - Fixed Chartink-style payload WebApp.gs कडे पाठवतो
-      जेणेकरून BuyList मध्ये rows add होतात का ते तपासता येईल.
-    - नंतर इथे full Kushal Sector FnO logic येईल.
-    """
-    now_ist = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
-
+    # ---- Forward directly to Google Apps Script WebApp ----
     if not WEBAPP_URL:
-        return jsonify({
-            "ok": False,
-            "error": "WEBAPP_URL not configured in env",
-            "mode": MODE
-        }), 500
-
-    # Chartink-style demo payload (stocks + trigger_prices अनिवार्य)
-    webapp_payload = {
-        "stocks": "RELIANCE,ICICIBANK,HDFCBANK",
-        "trigger_prices": "2800,950,1600",
-        "triggered_at": now_ist,
-        "scan_name": f"DEMO_KUSHAL_{MODE}",
-        "source": "RajanTradeAutomation_demo"
-    }
-
-    forward_status = None
-    forward_body = None
+        print("❌ WEBAPP_URL not configured in environment")
+        return {"ok": False, "error": "WEBAPP_URL not set"}, 500
 
     try:
+        # DIRECT forward – NO extra wrapper, NO action/payload
         res = requests.post(
             WEBAPP_URL,
-            json=webapp_payload,
-            timeout=10
+            json=data,
+            timeout=10,
         )
-        forward_status = res.status_code
-        forward_body = res.text
-    except Exception as e:
-        forward_status = -1
-        forward_body = str(e)
+        print("Forward Response status:", res.status_code)
+        print("Forward Response body:", res.text)
 
-    return jsonify({
-        "ok": True,
-        "mode": MODE,
-        "interval_secs": INTERVAL_SECS,
-        "webapp_url_present": bool(WEBAPP_URL),
-        "demo_payload": webapp_payload,
-        "webapp_forward_status": forward_status,
-        "webapp_forward_body": forward_body
-    }), 200
+    except Exception as e:
+        print("❌ FORWARD ERROR:", str(e))
+        print("============================================\n")
+        return {"ok": False, "error": "Forward failed"}, 500
+
+    print("====== CHARTINK ALERT PROCESSED SUCCESSFULLY ======\n")
+    return {"ok": True}, 200
+
+
+# ----------------------------------------------------
+# HEALTH CHECK
+# ----------------------------------------------------
+@app.get("/health")
+def health():
+    return {"ok": True}
+
+
+# ----------------------------------------------------
+# RUN SERVER
+# ----------------------------------------------------
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=10000)
