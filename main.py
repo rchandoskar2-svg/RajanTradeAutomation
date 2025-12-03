@@ -3,7 +3,7 @@ import os
 import requests
 import json
 import urllib.parse
-from fyers_apiv3 import fyersModel   # हे आधीच होतं, तसेच ठेवा
+from fyers_apiv3 import fyersModel
 
 app = Flask(__name__)
 
@@ -12,7 +12,7 @@ app = Flask(__name__)
 # ----------------------------------------------------
 CLIENT_ID = os.getenv("FYERS_CLIENT_ID")
 SECRET_KEY = os.getenv("FYERS_SECRET_KEY")
-REDIRECT_URI = os.getenv("FYERS_REDIRECT_URI")
+REDIRECT_URI = os.getenv("REDIRECT_URI")
 ACCESS_TOKEN = os.getenv("FYERS_ACCESS_TOKEN")
 
 # Your Google Apps Script EXEC URL
@@ -74,7 +74,7 @@ def fyers_redirect():
 @app.get("/fyers-profile")
 def fyers_profile():
     """
-    current ACCESS_TOKEN वापरून Fyers profile API test.
+    Test current ACCESS_TOKEN using Fyers profile API.
     """
     if not ACCESS_TOKEN or not CLIENT_ID:
         return jsonify({"ok": False, "error": "Access Token or Client ID Missing"}), 400
@@ -160,7 +160,6 @@ def chartink_alert():
         return {"ok": False, "error": "WEBAPP_URL not set"}, 500
 
     try:
-        # DIRECT forward – NO extra wrapper, NO action/payload
         res = requests.post(
             WEBAPP_URL,
             json=data,
@@ -189,7 +188,7 @@ def health():
 
 
 # ----------------------------------------------------
-# RUN SERVER  (ping / keep-alive भाग - नको काढू)
+# RUN SERVER  (ping / keep-alive – हा भाग कायम ठेवायचा)
 # ----------------------------------------------------
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=10000)
