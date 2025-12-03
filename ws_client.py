@@ -1,79 +1,88 @@
-"""
-ws_client.py - Fyers Data WebSocket test (v1)
-- ENV मधून FYERS_CLIENT_ID + FYERS_ACCESS_TOKEN वाचतो
-- काही symbols साठी live ticks print करतो
-"""
-
 import os
 import json
 import time
-from fyers_apiv3 import fyersModel
+import threading
+import websocket  # pip install websocket-client
 
+# ------------------------------
+# ENV VARIABLES
+# ------------------------------
+CLIENT_ID = os.getenv("FYERS_CLIENT_ID")
+ACCESS_TOKEN = os.getenv("FYERS_ACCESS_TOKEN")
 
-FYERS_CLIENT_ID = os.getenv("FYERS_CLIENT_ID", "").strip()
-FYERS_ACCESS_TOKEN = os.getenv("FYERS_ACCESS_TOKEN", "").strip()
-
-# live test साठी काही basic symbols (नंतर FnO universe लावू)
+# उदाहरण symbol – नंतर list वाढवू
 SYMBOLS = [
-    "NSE:NIFTY50-INDEX",
-    "NSE:BANKNIFTY-INDEX",
+    "NSE:SBIN-EQ",
     "NSE:RELIANCE-EQ",
 ]
 
+# Fyers data WebSocket endpoint (v3 style)
+WS_URL = "wss://api-t1.fyers.in/data/ws/v3"  # if this fails, we'll adjust to /data/ws/v2
 
-def on_message(message):
-    """प्रत्येक tick आली की इथे callback येतो."""
+
+def on_message(ws, message):
     try:
         data = json.loads(message)
     except Exception:
-        print("RAW:", message)
+        print("RAW MSG:", message)
         return
 
-    print("WS TICK:", json.dumps(data)[:300])
+    # Tick structure Fyers कडून थोडा बदलू शकतो, पण साधारण:
+    # { "symbol": "NSE:SBIN-EQ", "ltp": 123.45, "vol": ..., ... }
+    print("TICK:", data)
 
 
-def on_error(message):
-    print("WS ERROR:", message)
+def on_error(ws, error):
+    print("WS ERROR:", error)
 
 
-def on_close(message):
-    print("WS CLOSED:", message)
+def on_close(ws, close_status_code, close_msg):
+    print("WS CLOSED:", close_status_code, close_msg)
 
 
 def on_open(ws):
-    """
-    कनेक्शन open झाल्यावर लगेच subscribe करतो.
-    """
-    print("WS OPENED, subscribing symbols:", SYMBOLS)
-    # v3 data websocket साठी fyersModel मध्ये data_ws client आहे
-    ws.subscribe(symbols=SYMBOLS, data_type="symbolData")
+    print("WS OPENED, sending auth + subscription...")
+
+    # 1) Auth payload – काही implementations मध्ये header मध्ये token जातो,
+    # काहींमध्ये login payload. इथे basic data-token format वापरतो:
+    auth_token = f"{CLIENT_ID}:{ACCESS_TOKEN}"
+
+    # 2) Subscription payload – mode: 'quote' / 'full' इ. (depends on plan)
+    payload = {
+        "T": "SUB_L2",           # किंवा "SUB_MW"/"SUB_SYMBOL" – plan नुसार fine-tune करु
+        "AUTH": auth_token,
+        "SYMBOLS": ",".join(SYMBOLS),
+    }
+
+    try:
+        ws.send(json.dumps(payload))
+        print("SUB SENT:", payload)
+    except Exception as e:
+        print("WS SEND ERROR:", str(e))
 
 
-def start_ws():
-    if not FYERS_CLIENT_ID or not FYERS_ACCESS_TOKEN:
-        print("Missing FYERS_CLIENT_ID or FYERS_ACCESS_TOKEN in env")
+def run_ws():
+    if not CLIENT_ID or not ACCESS_TOKEN:
+        print("❌ Missing CLIENT_ID or ACCESS_TOKEN in environment!")
         return
 
-    print("Starting Fyers Data WebSocket...")
-    print("Client ID:", FYERS_CLIENT_ID)
-    fyers = fyersModel.FyersDataSocket(
-        access_token=f"{FYERS_CLIENT_ID}:{FYERS_ACCESS_TOKEN}",
-        log_path="",
-        on_message=on_message,
-        on_error=on_error,
-        on_close=on_close,
-        on_open=on_open,
-    )
+    while True:
+        try:
+            ws = websocket.WebSocketApp(
+                WS_URL,
+                on_open=on_open,
+                on_message=on_message,
+                on_error=on_error,
+                on_close=on_close,
+            )
+            ws.run_forever(ping_interval=20, ping_timeout=10)
+        except Exception as e:
+            print("WS CONNECT ERROR:", str(e))
 
-    fyers.connect()
-    # main thread alive ठेवण्यासाठी
-    try:
-        while True:
-            time.sleep(1)
-    except KeyboardInterrupt:
-        print("Stopping WS...")
-        fyers.close()
+        print("Reconnecting in 5 seconds...")
+        time.sleep(5)
 
 
 if __name__ == "__main__":
-    start_ws()
+    print("Starting Fyers Tick WebSocket client...")
+    run_ws()
