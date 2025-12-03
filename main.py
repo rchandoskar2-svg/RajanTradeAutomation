@@ -1,13 +1,8 @@
 """
-RajanTradeAutomation - Kushal Strategy Server (v1.4)
-Flask server on Render:
-- /              : Info
-- /health        : UptimeRobot ping (keeps free tier awake)
-- /fyers-auth    : Generate Fyers auth URL (manual use)
-- /fyers-redirect: Exchange auth_code -> access/refresh token (manual)
-- /fyers-profile : Quick test using current ACCESS_TOKEN
-- /test_symbol   : Test quotes API for any symbol
-- /run_strategy  : Step-2 -> Demo Chartink-style payload to Google WebApp
+RajanTradeAutomation - Kushal Strategy Server (v1.5)
+- /run_strategy आता आधी WebApp कडून settings वाचतो
+- नंतर sample (dummy) universe वर तुझ्या %move rules apply करून
+  WebApp ला Chartink-style payload POST करतो.
 """
 
 import os
@@ -22,7 +17,7 @@ from fyers_apiv3 import fyersModel
 app = Flask(__name__)
 
 # ----------------------------------------------------
-# ENV VARIABLES (exact keys as in Render)
+# ENV VARIABLES
 # ----------------------------------------------------
 CLIENT_ID = os.getenv("FYERS_CLIENT_ID", "").strip()
 SECRET_KEY = os.getenv("FYERS_SECRET_KEY", "").strip()
@@ -33,7 +28,6 @@ REFRESH_TOKEN = os.getenv("FYERS_REFRESH_TOKEN", "").strip()
 WEBAPP_URL = os.getenv("WEBAPP_URL", "").strip()   # Google Apps Script exec URL
 MODE = os.getenv("MODE", "SIM").strip()            # SIM / LIVE (future use)
 
-# Render env मधील INTERVAL_SECS default 1800 (30 मिनिटे)
 try:
     INTERVAL_SECS = int(os.getenv("INTERVAL_SECS", "1800").strip() or "1800")
 except Exception:
@@ -44,7 +38,7 @@ GRANT_TYPE = "authorization_code"
 
 
 # ----------------------------------------------------
-# ROOT + HEALTH (UptimeRobot)
+# ROOT + HEALTH
 # ----------------------------------------------------
 @app.get("/")
 def home():
@@ -56,10 +50,6 @@ def home():
 
 @app.get("/health")
 def health():
-    """
-    Simple health check for UptimeRobot.
-    Just returns ok so that Render free tier stays awake.
-    """
     return {
         "ok": True,
         "mode": MODE,
@@ -68,13 +58,10 @@ def health():
 
 
 # ----------------------------------------------------
-# ----------- FYERS AUTH / TOKEN ROUTES --------------
+# FYERS AUTH / PROFILE / TEST
 # ----------------------------------------------------
 @app.get("/fyers-auth")
 def fyers_auth():
-    """
-    Generate auth URL (manual use in browser).
-    """
     if not CLIENT_ID or not REDIRECT_URI:
         return jsonify({"error": "Missing CLIENT_ID or REDIRECT_URI"}), 500
 
@@ -91,12 +78,6 @@ def fyers_auth():
 
 @app.get("/fyers-redirect")
 def fyers_redirect():
-    """
-    Redirect URI endpoint.
-    Fyers will call this once you approve the app.
-    It exchanges auth_code for access_token + refresh_token.
-    (Mostly for manual use / debugging)
-    """
     auth_code = request.args.get("auth_code") or request.args.get("code")
     if not auth_code:
         return {"error": "No auth code"}, 400
@@ -119,10 +100,6 @@ def fyers_redirect():
 
 @app.get("/fyers-profile")
 def fyers_profile():
-    """
-    Quick test: current ACCESS_TOKEN वापरून profile call.
-    Token expire झाला असेल किंवा server down असेल तर error येईल.
-    """
     if not ACCESS_TOKEN or not CLIENT_ID:
         return {"ok": False, "error": "Access Token or Client ID Missing"}, 400
 
@@ -140,19 +117,8 @@ def fyers_profile():
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
-# ----------------------------------------------------
-# ----------- TEST SYMBOL ROUTE (QUOTES) -------------
-# ----------------------------------------------------
 @app.get("/test_symbol")
 def test_symbol():
-    """
-    Test Fyers market data for any symbol.
-    Examples:
-      /test_symbol?symbol=MCX:NATURALGAS24DECFUT
-      /test_symbol?symbol=NSE:NIFTY50-INDEX
-      /test_symbol?symbol=NSE:RELIANCE-EQ
-    FnO watchlist साठी symbols इथे तपासता येतील.
-    """
     symbol = request.args.get("symbol", "").strip()
     if not symbol:
         return jsonify({"ok": False, "error": "symbol param missing"}), 400
@@ -185,16 +151,113 @@ def test_symbol():
 
 
 # ----------------------------------------------------
-# ----------- MAIN STRATEGY ROUTE (STEP-2) -----------
+# HELPER: Fetch settings from WebApp
+# ----------------------------------------------------
+def fetch_settings():
+    """
+    WebApp.gs doGet?action=getSettings मधून settings JSON वाचतो.
+    """
+    if not WEBAPP_URL:
+        return {"ok": False, "error": "WEBAPP_URL not configured"}
+
+    url = WEBAPP_URL
+    if "?" in url:
+        url = url + "&action=getSettings"
+    else:
+        url = url + "?action=getSettings"
+
+    try:
+        res = requests.get(url, timeout=10)
+        data = res.json()
+    except Exception as e:
+        return {"ok": False, "error": f"GET settings failed: {e}"}
+
+    if not data.get("ok"):
+        return {"ok": False, "error": f"Settings error: {data}"}
+
+    settings = data.get("settings", {})
+    return {"ok": True, "settings": settings, "raw": data}
+
+
+# ----------------------------------------------------
+# HELPER: Dummy universe + strategy skeleton
+# ----------------------------------------------------
+def build_dummy_signals(settings, bias="BUY"):
+    """
+    सध्या data नसल्यामुळे static universe आणि %change वापरून
+    तुझ्या logic नुसार signals बनवतो.
+    नंतर इथे real Fyers data plug करू.
+    """
+
+    min_move = float(settings.get("MIN_MOVE_THRESHOLD", 2.5))
+    max_stocks = int(settings.get("MAX_STOCKS", 3))
+
+    # dummy sector wise universe with %change
+    # भविष्यात इथे FnO universe + real %change येईल.
+    if bias == "BUY":
+        # top gainer sector = BANKING (उदा.)
+        universe = [
+            {"symbol": "ICICIBANK", "pct": 1.2},
+            {"symbol": "HDFCBANK", "pct": 2.4},
+            {"symbol": "AXISBANK", "pct": 3.1},
+            {"symbol": "SBIN", "pct": 0.8},
+        ]
+        # rule: 0 < pct <= min_move
+        filtered = [
+            s for s in universe
+            if 0 < s["pct"] <= min_move
+        ]
+    else:
+        # bias = SELL, top loser sector = IT (उदा.)
+        universe = [
+            {"symbol": "INFY", "pct": -1.1},
+            {"symbol": "TCS", "pct": -2.0},
+            {"symbol": "WIPRO", "pct": -3.5},
+            {"symbol": "TECHM", "pct": -0.6},
+        ]
+        # rule: -min_move <= pct < 0
+        filtered = [
+            s for s in universe
+            if -min_move <= s["pct"] < 0
+        ]
+
+    # MAX_STOCKS limit
+    filtered = filtered[:max_stocks]
+
+    # dummy trigger prices: assume LTP approx
+    signals = []
+    for s in filtered:
+        # फक्त demo साठी काही approximate prices
+        base_price = {
+            "ICICIBANK": 950,
+            "HDFCBANK": 1600,
+            "AXISBANK": 1200,
+            "SBIN": 800,
+            "INFY": 1500,
+            "TCS": 3800,
+            "WIPRO": 450,
+            "TECHM": 1350,
+        }.get(s["symbol"], 100)
+
+        # %change apply करून approximate price
+        price = round(base_price * (1 + s["pct"] / 100), 2)
+        signals.append({"symbol": s["symbol"], "price": price})
+
+    return signals
+
+
+# ----------------------------------------------------
+# MAIN STRATEGY ROUTE
 # ----------------------------------------------------
 @app.post("/run_strategy")
 def run_strategy():
     """
-    Step-2 demo:
-    - Fixed Chartink-style payload WebApp.gs कडे पाठवतो
-      जेणेकरून BuyList मध्ये rows add होतात का ते तपासता येईल.
-    - नंतर इथे full Kushal Sector FnO logic येईल.
+    Step-2:
+    - Settings WebApp मधून fetch करतो
+    - dummy universe वर तुझ्या %move logic ने signals बनवतो
+    - Chartink-style payload WebApp.gs कडे POST करतो
     """
+
     now_ist = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
 
     if not WEBAPP_URL:
@@ -204,22 +267,48 @@ def run_strategy():
             "mode": MODE
         }), 500
 
-    # Chartink-style demo payload (stocks + trigger_prices अनिवार्य)
-    webapp_payload = {
-        "stocks": "RELIANCE,ICICIBANK,HDFCBANK",
-        "trigger_prices": "2800,950,1600",
-        "triggered_at": now_ist,
-        "scan_name": f"DEMO_KUSHAL_{MODE}",
-        "source": "RajanTradeAutomation_demo"
-    }
+    # 1) Settings fetch
+    settings_result = fetch_settings()
+    if not settings_result.get("ok"):
+        return jsonify({
+            "ok": False,
+            "error": settings_result.get("error"),
+            "mode": MODE
+        }), 500
 
-    forward_status = None
-    forward_body = None
+    settings = settings_result["settings"]
 
+    # 2) फिलहाल bias fixed ठेवू (उदा. BUY).
+    # पुढे market breadth वरून BUY/SELL ठरवू.
+    bias = "BUY"
+
+    # 3) Dummy universe वरून signals
+    signals = build_dummy_signals(settings, bias=bias)
+
+    if not signals:
+        demo_payload = {
+            "stocks": "",
+            "trigger_prices": "",
+            "triggered_at": now_ist,
+            "scan_name": f"KUSHAL_{bias}_{MODE}",
+            "source": "RajanTradeAutomation_no_signals"
+        }
+    else:
+        stocks = ",".join(s["symbol"] for s in signals)
+        prices = ",".join(str(s["price"]) for s in signals)
+        demo_payload = {
+            "stocks": stocks,
+            "trigger_prices": prices,
+            "triggered_at": now_ist,
+            "scan_name": f"KUSHAL_{bias}_{MODE}",
+            "source": "RajanTradeAutomation_signals"
+        }
+
+    # 4) WebApp ला forward
     try:
         res = requests.post(
             WEBAPP_URL,
-            json=webapp_payload,
+            json=demo_payload,
             timeout=10
         )
         forward_status = res.status_code
@@ -233,15 +322,12 @@ def run_strategy():
         "mode": MODE,
         "interval_secs": INTERVAL_SECS,
         "webapp_url_present": bool(WEBAPP_URL),
-        "demo_payload": webapp_payload,
+        "settings": settings,
+        "bias": bias,
+        "signals": signals,
         "webapp_forward_status": forward_status,
         "webapp_forward_body": forward_body
     }), 200
 
 
-# ----------------------------------------------------
-# RUN SERVER (local testing)
-# ----------------------------------------------------
-if __name__ == "__main__":
-    port = int(os.getenv("PORT", "10000"))
-    app.run(host="0.0.0.0", port=port)
+# (Render gunicorn entrypoint खाली जसाच्या तसा राहू दे)
