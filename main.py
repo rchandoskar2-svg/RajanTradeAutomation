@@ -18,7 +18,7 @@ ACCESS_TOKEN = os.getenv("FYERS_ACCESS_TOKEN")    # दररोज नवीन
 
 # तुम्हाला live पाहायचे symbols (सध्या फक्त SBIN)
 LIVE_SYMBOLS = ["NSE:SBIN-EQ"]
-LIVE_SYMBOLS = ["NSE:VEDL-EQ"]
+LIVE_SYMBOLS = ["NSE:AXIS-EQ"]
 
 # ========= HELPER: नवीन Fyers client बनवणे =========
 def make_fyers_client():
