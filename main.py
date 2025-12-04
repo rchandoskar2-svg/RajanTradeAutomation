@@ -1,8 +1,6 @@
 # ==========================================================
 # RajanTradeAutomation – main.py (NEW STRATEGY LIVE ENGINE)
-# Version: 1.0
-# Engine: Fyers REST + Fyers WebSocket + Google Sheets WebApp
-# Strategy: Market breadth -> Sector -> FnO stocks -> Lowest Volume 5m
+# Version: 1.1 – NSE+Fyers wired, WebSocket REALTIME ON
 # ==========================================================
 
 import os
@@ -19,7 +17,7 @@ from fyers_apiv3 import fyersModel
 from fyers_apiv3.FyersWebsocket import data_ws
 
 # ----------------------------------------------------------
-# ENVIRONMENT (Render dashboard मध्ये आधीच सेट केलेले)
+# ENVIRONMENT
 # ----------------------------------------------------------
 FYERS_CLIENT_ID = os.getenv("FYERS_CLIENT_ID", "").strip()
 FYERS_SECRET_KEY = os.getenv("FYERS_SECRET_KEY", "").strip()
@@ -27,49 +25,51 @@ FYERS_REDIRECT_URI = os.getenv("FYERS_REDIRECT_URI", "").strip()
 FYERS_ACCESS_TOKEN = os.getenv("FYERS_ACCESS_TOKEN", "").strip()
 
 WEBAPP_URL = os.getenv("WEBAPP_URL", "").strip()
-INTERVAL_SECS = int(os.getenv("INTERVAL_SECS", "60"))   # heartbeat / engine loop
+INTERVAL_SECS = int(os.getenv("INTERVAL_SECS", "60"))
 
 IST = ZoneInfo("Asia/Kolkata")
 
 # ----------------------------------------------------------
-# GLOBAL STATE
+# GLOBALS
 # ----------------------------------------------------------
 app = Flask(__name__)
 
-# Fyers REST client (quotes, history etc.)
+# Fyers REST client
 fyers_rest = fyersModel.FyersModel(
     client_id=FYERS_CLIENT_ID,
     token=FYERS_ACCESS_TOKEN,
     log_path=""
 )
 
-# Engine state
+# NSE session (common headers)
+nse_session = requests.Session()
+NSE_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) "
+                  "AppleWebKit/537.36 (KHTML, like Gecko) "
+                  "Chrome/119.0 Safari/537.36",
+    "Accept": "application/json, text/plain, */*",
+    "Referer": "https://www.nseindia.com/",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Connection": "keep-alive"
+}
+
 engine_state = {
-    "day": None,              # "YYYY-MM-DD"
-    "bias": None,             # "BUY" / "SELL"
-    "selected_sectors": [],   # ["NIFTY BANK", "NIFTY PSU BANK", ...]
-    "selected_symbols": [],   # ["NSE:SBIN-EQ", ...]
-    "symbols_direction": {},  # {"NSE:SBIN-EQ": "BUY", ...}
+    "day": None,
+    "bias": None,                 # BUY / SELL
+    "selected_sectors": [],
+    "selected_symbols": [],
+    "symbols_direction": {},
     "prepared": False,
     "ws_started": False,
     "settings": {},
-
-    # per symbol candle & trade state
-    "symbols": {
-        # "NSE:SBIN-EQ": {
-        #   "candles": [ {time, o, h, l, c, v, index}, ... ],
-        #   "lowest_volume_so_far": 0,
-        #   "signal_found": False,
-        #   "signal_candle": {...},
-        #   "active_trade": None
-        # }
-    }
+    "symbols": {}
 }
 
-engine_lock = threading.Lock()  # to protect engine_state
+engine_lock = threading.Lock()
+fyers_ws = None
 
 # ----------------------------------------------------------
-# UTILITIES
+# SMALL UTILS
 # ----------------------------------------------------------
 def now_ist():
     return datetime.now(tz=IST)
@@ -77,76 +77,167 @@ def now_ist():
 def today_str():
     return now_ist().strftime("%Y-%m-%d")
 
-def ist_time_hhmm():
-    return now_ist().strftime("%H:%M")
-
 def log(msg):
     print(f"[{now_ist().strftime('%Y-%m-%d %H:%M:%S')}] {msg}", flush=True)
 
 def post_webapp(action: str, payload: dict):
-    """Call Google Apps Script WebApp with JSON {action, payload}."""
     if not WEBAPP_URL:
-        log("WEBAPP_URL missing, cannot post.")
+        log("WEBAPP_URL missing.")
         return None
     try:
-        body = {"action": action, "payload": payload}
-        resp = requests.post(WEBAPP_URL, json=body, timeout=10)
+        resp = requests.post(WEBAPP_URL, json={"action": action, "payload": payload}, timeout=10)
         if resp.status_code == 200:
-            return resp.json()
+            try:
+                return resp.json()
+            except Exception:
+                return {}
         else:
-            log(f"WebApp {action} error: {resp.status_code} {resp.text[:200]}")
+            log(f"WebApp {action} HTTP {resp.status_code}: {resp.text[:200]}")
     except Exception as e:
-        log(f"WebApp {action} exception: {e}")
+        log(f"WebApp {action} error: {e}")
     return None
 
 def fetch_settings_from_sheet():
-    """Ask WebApp for current Settings."""
     res = post_webapp("getSettings", {})
     if res and res.get("ok"):
         return res.get("settings", {})
     return {}
 
 # ----------------------------------------------------------
-# DATA FETCHERS  (NSE / FYERS REST)
+# NSE HELPERS
 # ----------------------------------------------------------
-
-def fetch_market_breadth():
+def nse_get(url, params=None):
     """
-    TODO: Replace with actual NSE / Fyers breadth API.
-    Expected to return (advances, declines).
+    Generic NSE GET with session & headers.
     """
     try:
-        # Example (pseudo):
-        # resp = requests.get("https://some-nse-api/adv-dec", timeout=5)
-        # data = resp.json()
-        # adv = data["advances"]
-        # dec = data["declines"]
-        # return adv, dec
-        log("fetch_market_breadth() – TODO: wire real API. Using dummy 25/25 for now.")
-        return 25, 25
+        resp = nse_session.get(url, headers=NSE_HEADERS, params=params, timeout=10)
+        if resp.status_code != 200:
+            raise Exception(f"HTTP {resp.status_code}")
+        return resp.json()
     except Exception as e:
-        log(f"fetch_market_breadth error: {e}")
-        return 0, 0
+        log(f"NSE GET fail {url}: {e}")
+        return None
+
+# ----------------------------------------------------------
+# 1) MARKET BREADTH – ADV / DEC
+# ----------------------------------------------------------
+def fetch_market_breadth():
+    """
+    Primary: NSE 'allIndices' – pick NIFTY 50 advances/declines.
+    Fallback: if fail, use equal numbers (no bias).
+    """
+    # Unofficial NSE endpoint
+    url = "https://www.nseindia.com/api/allIndices"
+    data = nse_get(url)
+    if data and "data" in data:
+        try:
+            for idx in data["data"]:
+                name = idx.get("index") or idx.get("indexSymbol")
+                if not name:
+                    continue
+                if name.upper().startswith("NIFTY 50"):
+                    adv = idx.get("advances") or idx.get("advance")
+                    dec = idx.get("declines") or idx.get("decline")
+                    if isinstance(adv, dict):
+                        adv = adv.get("advances")
+                    if isinstance(dec, dict):
+                        dec = dec.get("declines")
+                    adv = int(adv or 0)
+                    dec = int(dec or 0)
+                    log(f"NSE breadth: adv={adv}, dec={dec}")
+                    return adv, dec
+        except Exception as e:
+            log(f"parse breadth error: {e}")
+
+    log("fetch_market_breadth: NSE failed, fallback adv=dec=0 (no bias).")
+    return 0, 0
+
+# ----------------------------------------------------------
+# 2) SECTOR PERFORMANCE – % CHANGE
+# ----------------------------------------------------------
+# List of sector indices we care about
+SECTOR_INDEX_NAMES = [
+    "NIFTY PSU BANK",
+    "NIFTY OIL & GAS",
+    "NIFTY ENERGY",
+    "NIFTY PHARMA",
+    "NIFTY CONSUMER DURABLES",
+    "NIFTY IT",
+    "NIFTY INFRASTRUCTURE",
+    "NIFTY CONSUMPTION",
+    "NIFTY AUTO",
+    "NIFTY HEALTHCARE",
+    "NIFTY METAL",
+    "NIFTY BANK",
+    "NIFTY PRIVATE BANK",
+    "NIFTY FINANCIAL SERVICES",
+    "NIFTY FINANCIAL SERVICES 25/50",
+    "NIFTY MEDIA"
+]
 
 def fetch_sector_performance():
     """
-    TODO: Implement NSE sector indices fetch.
-    Must return list of {sector_name, sector_code, per_chg, advances, declines}
+    Primary: NSE 'allIndices' – percentChange per index.
+    Returns list of {sector_name, sector_code, per_chg, advances, declines}
     """
+    url = "https://www.nseindia.com/api/allIndices"
+    data = nse_get(url)
     sectors = []
-    try:
-        # Example pseudo-call:
-        # url = "https://www.nseindia.com/api/allIndices"
-        # resp = requests.get(url, headers=..., timeout=10)
-        # data = resp.json()["data"]
-        # For each index we care about, map name -> %change
-        log("fetch_sector_performance() – TODO: real NSE API. Returning empty list for now.")
-    except Exception as e:
-        log(f"fetch_sector_performance error: {e}")
+
+    if data and "data" in data:
+        try:
+            for idx in data["data"]:
+                name = (idx.get("index") or idx.get("indexSymbol") or "").upper()
+                if name in SECTOR_INDEX_NAMES:
+                    per_chg = float(idx.get("percentChange") or 0.0)
+                    adv = idx.get("advances") or idx.get("advance")
+                    dec = idx.get("declines") or idx.get("decline")
+                    if isinstance(adv, dict):
+                        adv = adv.get("advances")
+                    if isinstance(dec, dict):
+                        dec = dec.get("declines")
+                    sectors.append({
+                        "sector_name": name,
+                        "sector_code": name,  # for now identical
+                        "per_chg": per_chg,
+                        "advances": int(adv or 0),
+                        "declines": int(dec or 0)
+                    })
+            log(f"fetch_sector_performance: got {len(sectors)} sectors from NSE.")
+        except Exception as e:
+            log(f"parse sectors error: {e}")
+
     return sectors
 
+# ----------------------------------------------------------
+# 3) UNIVERSE – FnO + SECTOR MAPPING (approx via NSE)
+# ----------------------------------------------------------
+def fetch_constituents_for_index(index_name):
+    """
+    NSE equity-stockIndices?index=INDEX – gives stocks for that sector/index.
+    """
+    url = "https://www.nseindia.com/api/equity-stockIndices"
+    data = nse_get(url, params={"index": index_name})
+    out = []
+    if data and "data" in data:
+        try:
+            for row in data["data"]:
+                sym = row.get("symbol")
+                if not sym:
+                    continue
+                out.append({
+                    "symbol": sym,
+                    "name": row.get("meta", {}).get("companyName") or sym,
+                    "sector": index_name,
+                    "is_fno": True,     # आपण Fyers वर quote मिळतो का ते नंतर check करू
+                    "enabled": True
+                })
+        except Exception as e:
+            log(f"parse constituents error for {index_name}: {e}")
+    return out
+
 def fyers_symbol(symbol: str) -> str:
-    """Ensure symbol in Fyers format e.g. 'NSE:SBIN-EQ'."""
     s = symbol.strip().upper()
     if ":" not in s:
         s = "NSE:" + s
@@ -156,32 +247,48 @@ def fyers_symbol(symbol: str) -> str:
 
 def fetch_fno_universe():
     """
-    TODO: Implement FnO universe fetch + sector mapping.
-    For now, returns empty list.
-    Each row: {"symbol": "NSE:SBIN-EQ", "name": "...", "sector": "NIFTY BANK", "is_fno": True}
+    Approximated universe:
+    - For each sector index we care about, get constituents from NSE
+    - We'll later filter to only symbols for which Fyers quotes succeed.
     """
-    log("fetch_fno_universe() – TODO: implement NSE FnO + sector mapping.")
-    return []
+    universe = []
+    seen = set()
 
+    for idx_name in SECTOR_INDEX_NAMES:
+        cons = fetch_constituents_for_index(idx_name)
+        for row in cons:
+            sym = row["symbol"].upper()
+            if sym in seen:
+                continue
+            seen.add(sym)
+            row["symbol"] = fyers_symbol(sym)
+            universe.append(row)
+
+    log(f"fetch_fno_universe: total approximate symbols={len(universe)}")
+    return universe
+
+# ----------------------------------------------------------
+# FYERS REST HELPERS (quotes + history)
+# ----------------------------------------------------------
 def fyers_quotes(symbols):
     """
-    Fetch LTP, %change, volume for given symbols from Fyers REST.
+    Fetch LTP, %change, volume for given Fyers symbols.
     """
     if not symbols:
         return {}
+
     try:
         symbol_str = ",".join(symbols)
-        data = {
-            "symbols": symbol_str
-        }
+        data = {"symbols": symbol_str}
         resp = fyers_rest.quotes(data=data)
         q = {}
         for item in resp.get("d", []):
-            sym = item.get("n")  # symbol name
+            sym = item.get("n")
+            v = item.get("v", {}) or {}
             q[sym] = {
-                "ltp": item.get("v", {}).get("lp", 0),
-                "percent_change": item.get("v", {}).get("chp", 0),
-                "volume": item.get("v", {}).get("volume", 0)
+                "ltp": v.get("lp", 0.0),
+                "percent_change": v.get("chp", 0.0),
+                "volume": v.get("volume", 0)
             }
         return q
     except Exception as e:
@@ -190,14 +297,9 @@ def fyers_quotes(symbols):
 
 def fyers_5min_history(symbol, start: datetime, end: datetime):
     """
-    Fetch 5-min candles for given symbol between start and end (IST).
-    Returns list of dicts: {time, open, high, low, close, volume}
+    Use Fyers history API (5m) for given day, filter 09:15–09:30.
     """
     try:
-        # Fyers uses epoch seconds in IST for 'from' and 'to'
-        start_epoch = int(start.timestamp())
-        end_epoch = int(end.timestamp())
-
         data = {
             "symbol": symbol,
             "resolution": "5",
@@ -211,7 +313,6 @@ def fyers_5min_history(symbol, start: datetime, end: datetime):
         for row in resp.get("candles", []):
             ts, o, h, l, c, v = row
             t = datetime.fromtimestamp(ts, tz=IST)
-            # filter within required time
             if start <= t <= end:
                 candles.append({
                     "time": t,
@@ -227,28 +328,25 @@ def fyers_5min_history(symbol, start: datetime, end: datetime):
         return []
 
 # ----------------------------------------------------------
-# STOCK SELECTION ENGINE (09:25–09:29)
+# SELECTION ENGINE (09:26–09:29)
 # ----------------------------------------------------------
-
 def decide_bias(adv, dec):
     if adv > dec:
         return "BUY"
     elif dec > adv:
         return "SELL"
-    return None  # no clear bias
+    return None
 
 def pick_sectors(bias, sectors, settings):
-    """
-    sectors: list of {sector_name, sector_code, per_chg, advances, declines}
-    BUY -> pick top +ve ; SELL -> bottom -ve
-    """
     if not sectors:
         return []
 
     if bias == "BUY":
+        # सर्वात जास्त % up
         sorted_sec = sorted(sectors, key=lambda x: x.get("per_chg", 0), reverse=True)
         count = int(settings.get("BUY_SECTOR_COUNT", 2))
     elif bias == "SELL":
+        # सर्वात जास्त % down (bottom negative)
         sorted_sec = sorted(sectors, key=lambda x: x.get("per_chg", 0))
         count = int(settings.get("SELL_SECTOR_COUNT", 2))
     else:
@@ -257,15 +355,10 @@ def pick_sectors(bias, sectors, settings):
     return sorted_sec[:count]
 
 def filter_stocks_by_percent(bias, universe_rows, quotes_map, settings):
-    """
-    universe_rows: [{symbol, name, sector, is_fno, enabled}]
-    quotes_map: {symbol: {ltp, percent_change, volume}}
-    """
     max_up = float(settings.get("MAX_UP_PERCENT", 2.5))
     max_down = float(settings.get("MAX_DOWN_PERCENT", -2.5))
 
     selected = []
-
     for row in universe_rows:
         sym = row["symbol"]
         q = quotes_map.get(sym)
@@ -273,19 +366,17 @@ def filter_stocks_by_percent(bias, universe_rows, quotes_map, settings):
             continue
         pc = q["percent_change"]
         if bias == "BUY":
-            if 0 <= pc <= max_up:
+            if 0 < pc <= max_up:
                 selected.append((sym, row["sector"], pc, q))
         elif bias == "SELL":
-            if max_down <= pc <= 0:
+            if max_down <= pc < 0:
                 selected.append((sym, row["sector"], pc, q))
 
-    # Rank by %change absolute in correct direction
     if bias == "BUY":
-        selected.sort(key=lambda x: x[2], reverse=True)
+        selected.sort(key=lambda x: x[2], reverse=True)   # highest +% first
     else:
-        selected.sort(key=lambda x: x[2])  # more negative first
+        selected.sort(key=lambda x: x[2])                 # lowest (most negative) first
 
-    # we can limit to e.g. 5–10 stocks
     max_stocks = 10
     return selected[:max_stocks]
 
@@ -293,42 +384,37 @@ def prepare_day_if_needed():
     with engine_lock:
         today = today_str()
         if engine_state["day"] == today and engine_state["prepared"]:
-            return  # already done
+            return
 
-    # Only run between 09:25 and 09:29 IST
+    # Strictly between 09:26–09:30
     now = now_ist()
     hhmm = now.strftime("%H:%M")
-    if not ("09:25" <= hhmm < "09:30"):
+    if not ("09:26" <= hhmm < "09:30"):
         return
 
-    log("Preparing day – fetching settings, breadth, sector performance, FnO universe...")
-
+    log("Preparing day – settings + breadth + sector + universe…")
     settings = fetch_settings_from_sheet()
     adv, dec = fetch_market_breadth()
     bias = decide_bias(adv, dec)
+    log(f"Market breadth adv={adv} dec={dec} bias={bias}")
 
     sectors = fetch_sector_performance()
     chosen_sectors = pick_sectors(bias, sectors, settings)
 
-    # Universe & filter by chosen sectors
+    # Universe from NSE (approx) + filter to chosen sectors
     universe = fetch_fno_universe()
-    chosen_symbols = [u for u in universe if u.get("sector") in [s["sector_name"] for s in chosen_sectors]]
+    chosen_sector_names = [s["sector_name"] for s in chosen_sectors]
+    chosen_symbols_rows = [u for u in universe if u.get("sector") in chosen_sector_names]
 
-    # Make Fyers symbols
-    for u in chosen_symbols:
-        u["symbol"] = fyers_symbol(u["symbol"])
+    # Quotes for those symbols (filter non-Fyers)
+    quotes_map = fyers_quotes([u["symbol"] for u in chosen_symbols_rows])
+    chosen_symbols_rows = [u for u in chosen_symbols_rows if u["symbol"] in quotes_map]
 
-    # Quotes for chosen symbols
-    quotes_map = fyers_quotes([u["symbol"] for u in chosen_symbols])
-
-    # Filter by %change rule
-    filtered = filter_stocks_by_percent(bias, chosen_symbols, quotes_map, settings)
-
-    # Final selection
+    filtered = filter_stocks_by_percent(bias, chosen_symbols_rows, quotes_map, settings)
     final_symbols = [row[0] for row in filtered]
     symbols_direction = {sym: bias for sym in final_symbols}
 
-    # Push to StockList sheet
+    # Update StockList sheet
     stocks_payload = []
     for sym, sector, pc, q in filtered:
         stocks_payload.append({
@@ -342,28 +428,25 @@ def prepare_day_if_needed():
         })
     post_webapp("updateStockList", {"stocks": stocks_payload})
 
-    # Also sync Universe sheet
+    # Push Universe + sectors snapshot (optional)
     post_webapp("syncUniverse", {"universe": universe})
     post_webapp("updateSectorPerf", {"sectors": sectors})
 
-    # Fill first 3 candles (9:15–9:30) via history
+    # First 3 candles via history (09:15–09:30)
     history_start = now.replace(hour=9, minute=15, second=0, microsecond=0)
     history_end = now.replace(hour=9, minute=30, second=0, microsecond=0)
 
     symbol_states = {}
-
     for sym in final_symbols:
         candles = fyers_5min_history(sym, history_start, history_end)
         candles_sorted = sorted(candles, key=lambda x: x["time"])
         rows_for_sheet = []
         lowest_v = None
         idx = 1
-
         for c in candles_sorted:
             volume = c["volume"]
             if lowest_v is None or volume < lowest_v:
                 lowest_v = volume
-
             rows_for_sheet.append({
                 "symbol": sym,
                 "time": c["time"].isoformat(),
@@ -394,7 +477,7 @@ def prepare_day_if_needed():
     with engine_lock:
         engine_state["day"] = today
         engine_state["bias"] = bias
-        engine_state["selected_sectors"] = [s["sector_name"] for s in chosen_sectors]
+        engine_state["selected_sectors"] = chosen_sector_names
         engine_state["selected_symbols"] = final_symbols
         engine_state["symbols_direction"] = symbols_direction
         engine_state["symbols"] = symbol_states
@@ -404,17 +487,9 @@ def prepare_day_if_needed():
     log(f"Day prepared. Bias={bias}, symbols={final_symbols}")
 
 # ----------------------------------------------------------
-# FYERS WEBSOCKET HANDLERS (EXECUTIVE PATTERN)
+# WEBSOCKET HANDLERS (Fyers executive pattern)
 # ----------------------------------------------------------
-
-fyers_ws = None
-
 def onmessage_ws(message):
-    """
-    Called for every incoming WebSocket message.
-    We expect SymbolUpdate ticks.
-    """
-    # message example: {'symbol': 'NSE:SBIN-EQ', 'ltp': 620.5, 'tt': 1701675900, ...}
     try:
         if isinstance(message, str):
             msg = json.loads(message)
@@ -423,16 +498,22 @@ def onmessage_ws(message):
     except Exception:
         msg = message
 
-    # Fyers sends key "symbol" and "ltp" etc.
-    symbol = msg.get("symbol")
+    if not isinstance(msg, dict):
+        return
+
+    d = msg.get("d") or msg  # library sometimes nests inside 'd'
+    symbol = d.get("symbol") or d.get("symbol_name")
     if not symbol:
         return
 
-    ltp = msg.get("ltp") or msg.get("last_traded_price") or msg.get("price")
-    ts = msg.get("timestamp") or msg.get("tt") or int(time.time())
-    t = datetime.fromtimestamp(ts, tz=IST)
+    ltp = d.get("ltp") or d.get("last_traded_price") or d.get("price") or 0.0
+    ts = d.get("timestamp") or d.get("tt") or int(time.time())
+    t = datetime.fromtimestamp(int(ts), tz=IST)
 
-    handle_tick(symbol, float(ltp or 0), t)
+    # volume tick (optional)
+    vol_tick = d.get("volume") or 1
+
+    handle_tick(symbol, float(ltp), t, int(vol_tick))
 
 def onerror_ws(message):
     log(f"[WS ERROR] {message}")
@@ -441,18 +522,13 @@ def onclose_ws(message):
     log(f"[WS CLOSED] {message}")
 
 def onopen_ws():
-    """
-    Subscribe to selected symbols with SymbolUpdate type.
-    """
-    global fyers_ws
+    data_type = "SymbolUpdate"
     with engine_lock:
         symbols = engine_state.get("selected_symbols", [])
     if not symbols:
-        log("WS onopen: no symbols to subscribe.")
+        log("WS onopen: no symbols.")
         return
-
-    data_type = "SymbolUpdate"
-    log(f"WS onopen: subscribing to {symbols}")
+    log(f"WS onopen subscribing: {symbols}")
     fyers_ws.subscribe(symbols=symbols, data_type=data_type)
     fyers_ws.keep_running()
 
@@ -465,7 +541,7 @@ def start_websocket_if_needed():
     if ws_started or not symbols:
         return
 
-    log("Starting Fyers WebSocket for live ticks...")
+    log("Starting Fyers WebSocket…")
     fyers_ws = data_ws.FyersDataSocket(
         access_token=FYERS_ACCESS_TOKEN,
         log_path="",
@@ -477,20 +553,14 @@ def start_websocket_if_needed():
         on_error=onerror_ws,
         on_message=onmessage_ws
     )
-
     threading.Thread(target=fyers_ws.connect, daemon=True).start()
-
     with engine_lock:
         engine_state["ws_started"] = True
 
 # ----------------------------------------------------------
-# TICK HANDLING -> 5m CANDLES + SIGNAL / ENTRY / EXIT
+# TICK → 5m CANDLE + SIGNAL / ENTRY
 # ----------------------------------------------------------
-
 def candle_bucket_time(t: datetime) -> datetime:
-    """
-    Given tick time, return candle close time for 5-min candle.
-    """
     minute = (t.minute // 5) * 5 + 5
     hour = t.hour
     if minute >= 60:
@@ -498,27 +568,24 @@ def candle_bucket_time(t: datetime) -> datetime:
         hour += 1
     return t.replace(hour=hour, minute=minute, second=0, microsecond=0)
 
-def handle_tick(symbol: str, ltp: float, t: datetime):
+def handle_tick(symbol: str, ltp: float, t: datetime, vol_tick: int = 1):
     with engine_lock:
         sym_state = engine_state["symbols"].get(symbol)
-        if not sym_state:
-            return
-        bias = engine_state["bias"]
-        settings = engine_state["settings"]
+        bias = engine_state.get("bias")
+        settings = engine_state.get("settings", {})
+    if not sym_state:
+        return
 
-    # Build / update current 5-min candle
     bucket_time = candle_bucket_time(t)
-
     candles = sym_state["candles"]
+
     if candles and candles[-1]["time"] == bucket_time.isoformat():
-        # update current candle
         c = candles[-1]
         c["high"] = max(c["high"], ltp)
         c["low"] = min(c["low"], ltp)
         c["close"] = ltp
-        c["volume"] += 1  # simplistic tick-volume; you can replace with real volume from msg
+        c["volume"] += vol_tick
     else:
-        # close previous candle (if any) and create new one
         index = (candles[-1]["candle_index"] + 1) if candles else 1
         c = {
             "symbol": symbol,
@@ -528,7 +595,7 @@ def handle_tick(symbol: str, ltp: float, t: datetime):
             "high": ltp,
             "low": ltp,
             "close": ltp,
-            "volume": 1,
+            "volume": vol_tick,
             "candle_index": index,
             "lowest_volume_so_far": sym_state.get("lowest_volume_so_far") or 0,
             "is_signal": False,
@@ -536,8 +603,7 @@ def handle_tick(symbol: str, ltp: float, t: datetime):
         }
         candles.append(c)
 
-    # recompute lowest volume so far & check signal only when candle closes
-    # approx: when now > bucket_time
+    # on every tick after bucket close, evaluate (approx)
     if t >= bucket_time:
         evaluate_candle(symbol)
 
@@ -562,27 +628,20 @@ def evaluate_candle(symbol: str):
     cl = c["close"]
     idx = c["candle_index"]
 
-    # we care only from 4th candle onwards
     if idx < 4:
         return
 
     if lowest_vol == 0 or vol < lowest_vol:
         lowest_vol = vol
-
-    # update lowest volume in state
     c["lowest_volume_so_far"] = lowest_vol
 
-    # Check signal conditions
     is_signal = False
     direction = None
-
     if bias == "BUY":
-        # red candle (open > close) & lowest volume
         if o > cl and vol <= lowest_vol:
             is_signal = True
             direction = "BUY"
     elif bias == "SELL":
-        # green candle (close > open) & lowest volume
         if cl > o and vol <= lowest_vol:
             is_signal = True
             direction = "SELL"
@@ -592,21 +651,17 @@ def evaluate_candle(symbol: str):
             sym_state["lowest_volume_so_far"] = lowest_vol
         return
 
-    # Mark signal in memory & sheet
     entry_price = h if direction == "BUY" else l
     sl = l if direction == "BUY" else h
     risk_per_share = abs(entry_price - sl)
-
     rr = float(settings.get("RR_RATIO", 2.0) or 2.0)
     target_price = entry_price + rr * risk_per_share if direction == "BUY" else entry_price - rr * risk_per_share
 
-    # Quantity from per-trade risk
     qty = 1
     per_trade_risk_en = str(settings.get("ENABLE_PER_TRADE_RISK", "TRUE")).upper() == "TRUE"
-    if per_trade_risk_en:
+    if per_trade_risk_en and risk_per_share > 0:
         per_trade_risk = float(settings.get("PER_TRADE_RISK", 1000) or 1000.0)
-        if risk_per_share > 0:
-            qty = int(per_trade_risk // risk_per_share) or 1
+        qty = int(per_trade_risk // risk_per_share) or 1
 
     signal_row = {
         "symbol": symbol,
@@ -624,10 +679,8 @@ def evaluate_candle(symbol: str):
         "rr": rr,
         "status": "PENDING"
     }
-
     post_webapp("pushSignal", {"signals": [signal_row]})
 
-    # Immediately treat entry as triggered at candle high/low (simplification)
     trade_payload = {
         "symbol": symbol,
         "direction": direction,
@@ -639,7 +692,6 @@ def evaluate_candle(symbol: str):
     }
     post_webapp("pushTradeEntry", trade_payload)
 
-    # update in memory
     with engine_lock:
         sym_state["lowest_volume_so_far"] = lowest_vol
         sym_state["signal_found"] = True
@@ -656,29 +708,34 @@ def evaluate_candle(symbol: str):
         }
         engine_state["symbols"][symbol] = sym_state
 
-    log(f"Signal & entry created for {symbol} dir={direction} entry={entry_price} sl={sl} tgt={target_price} qty={qty}")
+    log(f"SIGNAL+ENTRY {symbol} dir={direction} entry={entry_price} sl={sl} tgt={target_price} qty={qty}")
 
 # ----------------------------------------------------------
-# EXIT ENGINE – TARGET (half) + 15:15 square-off
+# EXIT ENGINE – SL / TARGET HALF / 15:15
 # ----------------------------------------------------------
-
 def check_exits():
-    """Check for SL/Target/Time exits using latest LTP from quotes."""
     with engine_lock:
         symbols_with_trades = [s for s, st in engine_state["symbols"].items() if st.get("active_trade")]
+        settings = engine_state.get("settings", {})
 
     if not symbols_with_trades:
         return
 
     quotes = fyers_quotes(symbols_with_trades)
-    settings = engine_state["settings"]
     partial_percent = float(settings.get("PARTIAL_EXIT_PERCENT", 50) or 50.0)
 
+    now = now_ist()
+    auto_sq_time = settings.get("AUTO_SQUAREOFF_TIME", "15:15")
+    auto_h, auto_m = [int(x) for x in auto_sq_time.split(":")]
+    auto_sq_dt = now.replace(hour=auto_h, minute=auto_m, second=0, microsecond=0)
+
     for sym in symbols_with_trades:
-        st = engine_state["symbols"][sym]
-        trade = st["active_trade"]
+        with engine_lock:
+            st = engine_state["symbols"][sym]
+            trade = st["active_trade"]
         if not trade:
             continue
+
         q = quotes.get(sym)
         if not q:
             continue
@@ -692,42 +749,33 @@ def check_exits():
         half_done = trade["half_exit_done"]
         full_done = trade["full_exit_done"]
 
-        now = now_ist()
-        auto_sq_time = engine_state["settings"].get("AUTO_SQUAREOFF_TIME", "15:15")
-        auto_h, auto_m = [int(x) for x in auto_sq_time.split(":")]
-        auto_sq_dt = now.replace(hour=auto_h, minute=auto_m, second=0, microsecond=0)
+        events = []
 
-        exit_events = []
-
-        # 1) SL check
+        # SL
         if direction == "BUY" and ltp <= sl and not full_done:
             pnl = (sl - entry) * qty_total
-            exit_events.append(("SL", qty_rem, sl, "SL-HIT", pnl))
+            events.append(("SL", qty_rem, sl, "SL-HIT", pnl))
         elif direction == "SELL" and ltp >= sl and not full_done:
             pnl = (entry - sl) * qty_total
-            exit_events.append(("SL", qty_rem, sl, "SL-HIT", pnl))
+            events.append(("SL", qty_rem, sl, "SL-HIT", pnl))
 
-        # 2) Target / partial exit
+        # Target -> partial
         if not half_done and not full_done:
             if direction == "BUY" and ltp >= tgt:
-                qty_half = int(qty_total * (partial_percent / 100.0))
-                if qty_half <= 0:
-                    qty_half = qty_total
+                qty_half = int(qty_total * (partial_percent / 100.0)) or qty_total
                 pnl = (tgt - entry) * qty_half
-                exit_events.append(("PARTIAL", qty_half, tgt, "PARTIAL", pnl))
+                events.append(("PARTIAL", qty_half, tgt, "PARTIAL", pnl))
             elif direction == "SELL" and ltp <= tgt:
-                qty_half = int(qty_total * (partial_percent / 100.0))
-                if qty_half <= 0:
-                    qty_half = qty_total
+                qty_half = int(qty_total * (partial_percent / 100.0)) or qty_total
                 pnl = (entry - tgt) * qty_half
-                exit_events.append(("PARTIAL", qty_half, tgt, "PARTIAL", pnl))
+                events.append(("PARTIAL", qty_half, tgt, "PARTIAL", pnl))
 
-        # 3) Time-based 15:15 square-off
+        # Time-based final exit
         if now >= auto_sq_dt and not full_done:
             pnl = (ltp - entry) * qty_rem if direction == "BUY" else (entry - ltp) * qty_rem
-            exit_events.append(("FINAL", qty_rem, ltp, "CLOSED", pnl))
+            events.append(("FINAL", qty_rem, ltp, "CLOSED", pnl))
 
-        for exit_type, exit_qty, exit_price, status, pnl in exit_events:
+        for exit_type, exit_qty, exit_price, status, pnl in events:
             payload = {
                 "symbol": sym,
                 "exit_type": exit_type,
@@ -738,7 +786,7 @@ def check_exits():
                 "status": status
             }
             post_webapp("pushTradeExit", payload)
-            log(f"Exit {exit_type} for {sym}, qty={exit_qty}, price={exit_price}, pnl={pnl}")
+            log(f"EXIT {exit_type} {sym} qty={exit_qty} price={exit_price} pnl={pnl}")
 
             with engine_lock:
                 if exit_type == "PARTIAL":
@@ -746,7 +794,7 @@ def check_exits():
                     trade["half_exit_done"] = True
                     if trade["qty_remaining"] <= 0:
                         trade["full_exit_done"] = True
-                else:  # SL or FINAL
+                else:
                     trade["qty_remaining"] = 0
                     trade["half_exit_done"] = True
                     trade["full_exit_done"] = True
@@ -754,51 +802,44 @@ def check_exits():
                 engine_state["symbols"][sym] = st
 
 # ----------------------------------------------------------
-# ENGINE HEARTBEAT LOOP  (uses INTERVAL_SECS)
+# ENGINE LOOP (heartbeat)
 # ----------------------------------------------------------
-
 def engine_loop():
     log("Engine loop started.")
     while True:
         try:
-            # 1) Prepare day between 09:25–09:29
             prepare_day_if_needed()
-
-            # 2) Start WS once selection done
             with engine_lock:
-                prepared = engine_state["prepared"]
+                prepared = engine_state.get("prepared", False)
             if prepared:
                 start_websocket_if_needed()
-
-            # 3) Periodic exit checks
-            check_exits()
-
+                check_exits()
         except Exception as e:
-            log(f"Engine loop error: {e}")
-
+            log(f"engine_loop error: {e}")
         time.sleep(INTERVAL_SECS)
 
 # ----------------------------------------------------------
-# FLASK ROUTES (Ping / Health / Manual control)
+# FLASK ROUTES
 # ----------------------------------------------------------
-
 @app.route("/", methods=["GET"])
 def root():
-    return "RajanTradeAutomation Engine Running ✔", 200
+    return "RajanTradeAutomation Engine ✔", 200
 
 @app.route("/health", methods=["GET"])
 def health():
-    return jsonify({
-        "ok": True,
-        "time": now_ist().isoformat(),
-        "prepared": engine_state.get("prepared", False),
-        "bias": engine_state.get("bias"),
-        "symbols": engine_state.get("selected_symbols", [])
-    })
+    with engine_lock:
+        data = {
+            "ok": True,
+            "time": now_ist().isoformat(),
+            "prepared": engine_state.get("prepared", False),
+            "bias": engine_state.get("bias"),
+            "symbols": engine_state.get("selected_symbols", []),
+            "sectors": engine_state.get("selected_sectors", [])
+        }
+    return jsonify(data)
 
 @app.route("/ping", methods=["GET"])
 def ping():
-    # For UptimeRobot external ping
     log("Ping received.")
     return "PONG", 200
 
@@ -810,13 +851,9 @@ def reload_settings():
     return jsonify({"ok": True, "settings": s})
 
 # ----------------------------------------------------------
-# MAIN ENTRY
+# MAIN
 # ----------------------------------------------------------
-
 if __name__ == "__main__":
-    # Start engine loop in background
     threading.Thread(target=engine_loop, daemon=True).start()
-
-    # Run Flask app (Render will bind PORT env automatically)
     port = int(os.getenv("PORT", "8000"))
     app.run(host="0.0.0.0", port=port)
