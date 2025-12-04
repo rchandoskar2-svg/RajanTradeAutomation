@@ -11,22 +11,26 @@ from fyers_apiv3 import fyersModel
 app = Flask(__name__)
 
 # ----------------------------------------------------
-# ENV VARIABLES
+# ENV VARIABLES (Render मधले exact keys)
 # ----------------------------------------------------
-CLIENT_ID = os.getenv("FYERS_CLIENT_ID")          # उदा. N83MS34FQO-100
+CLIENT_ID = os.getenv("FYERS_CLIENT_ID")            # उदा. N83MS34FQO-100
 SECRET_KEY = os.getenv("FYERS_SECRET_KEY")
-REDIRECT_URI = os.getenv("REDIRECT_URI")
-ACCESS_TOKEN = os.getenv("FYERS_ACCESS_TOKEN")    # रोज अपडेट होणारा token
+REDIRECT_URI = os.getenv("FYERS_REDIRECT_URI")      # ✅ नाव आता बरोबर
+ACCESS_TOKEN = os.getenv("FYERS_ACCESS_TOKEN")      # रोज अपडेट होणारा token
 
 WEBAPP_URL = os.getenv("WEBAPP_URL", "").strip()
 CHARTINK_TOKEN = os.getenv("CHARTINK_TOKEN", "").strip()
 
+# इतर optional env (आतासाठी वापरत नाही पण ठेवले)
+MODE = os.getenv("MODE", "").strip()
+INTERVAL_SECS = os.getenv("INTERVAL_SECS", "").strip()
+
 RESPONSE_TYPE = "code"
 GRANT_TYPE = "authorization_code"
 
-# Fyers WebSocket endpoint (API v3 data)
+# Fyers WebSocket endpoint (data WS)
 FYERS_WS_URL = "wss://api.fyers.in/socket/v2/data/"
-# Live feed साठी symbols (तुला हवेले)
+# Live feed साठी symbols
 FYERS_SYMBOLS = ["NSE:SBIN-EQ", "NSE:RELIANCE-EQ"]
 
 
@@ -43,12 +47,16 @@ def home():
 
 
 # ----------------------------------------------------
-# FYERS AUTH FLOW (जुने routes कायम ठेवले)
+# FYERS AUTH FLOW
 # ----------------------------------------------------
 @app.get("/fyers-auth")
 def fyers_auth():
+    """
+    Redirect URL वापरून auth URL बनवतो.
+    हा URL तू browser मध्ये उघडतोस.
+    """
     if not CLIENT_ID or not REDIRECT_URI:
-        return jsonify({"error": "Missing CLIENT_ID or REDIRECT_URI"}), 500
+        return jsonify({"error": "Missing CLIENT_ID or FYERS_REDIRECT_URI"}), 500
 
     encoded_redirect = urllib.parse.quote(REDIRECT_URI, safe="")
     url = (
@@ -63,12 +71,16 @@ def fyers_auth():
 
 @app.get("/fyers-redirect")
 def fyers_redirect():
+    """
+    Fyers login नंतर इथे redirect होतो.
+    इथून आपण access_token JSON मध्ये बघून Render env मध्ये टाकतो.
+    """
     auth_code = request.args.get("auth_code") or request.args.get("code")
     if not auth_code:
         return {"error": "No auth code"}, 400
 
-    if not all([CLIENT_ID, SECRET_KEY, REDIRECT_URI]):
-        return {"error": "Missing env for SessionModel"}, 500
+    if not CLIENT_ID or not SECRET_KEY or not REDIRECT_URI:
+        return {"error": "Missing env for SessionModel"}, 400
 
     session = fyersModel.SessionModel(
         client_id=CLIENT_ID,
@@ -79,15 +91,22 @@ def fyers_redirect():
     )
 
     session.set_token(auth_code)
-    response = session.generate_token()
-    # इथे मिळालेला access_token तू env मध्ये टाकतोस (Render)
+    try:
+        response = session.generate_token()
+    except Exception as e:
+        return {"error": f"generate_token failed: {str(e)}"}, 500
+
+    # इथे मिळालेला access_token तू FYERS_ACCESS_TOKEN मध्ये टाकतोस (Render env)
     return jsonify(response)
 
 
+# ----------------------------------------------------
+# FYERS PROFILE TEST
+# ----------------------------------------------------
 @app.get("/fyers-profile")
 def fyers_profile():
     """
-    Test current ACCESS_TOKEN using Fyers profile API.
+    सध्याचा ACCESS_TOKEN काम करतो का ते तपासण्यासाठी.
     """
     if not ACCESS_TOKEN or not CLIENT_ID:
         return jsonify({"ok": False, "error": "Access Token or Client ID Missing"}), 400
@@ -107,7 +126,7 @@ def fyers_profile():
 
 
 # ----------------------------------------------------
-# CHARTINK DEBUG ROUTE (ठेवले आहे; वापरलास तर)
+# CHARTINK DEBUG ROUTE
 # ----------------------------------------------------
 @app.post("/debug-chartink")
 def debug_chartink():
@@ -123,7 +142,7 @@ def debug_chartink():
 
 
 # ----------------------------------------------------
-# MAIN CHARTINK ALERT ROUTE (WebApp.gs साठी forward)
+# MAIN CHARTINK ALERT ROUTE → WebApp.gs
 # ----------------------------------------------------
 @app.route("/chartink-alert", methods=["GET", "POST"])
 def chartink_alert():
@@ -134,16 +153,19 @@ def chartink_alert():
     print("Method:", request.method)
     print("Query args:", dict(request.args))
 
+    # Token validation
     incoming_token = request.args.get("token", "").strip()
     if CHARTINK_TOKEN and incoming_token != CHARTINK_TOKEN:
         print("❌ Invalid token:", incoming_token)
         return {"ok": False, "error": "Invalid token"}, 403
 
+    # Handle GET ping
     if request.method == "GET":
-        print("GET ping received on /chartink-alert → returning pong")
+        print("GET ping received on /chartink-alert → pong")
         print("============================================\n")
         return {"ok": True, "msg": "pong"}, 200
 
+    # POST: actual payload
     try:
         body_raw = request.data.decode(errors="ignore")
         print("RAW BODY:", body_raw or "[EMPTY]")
@@ -175,11 +197,11 @@ def chartink_alert():
 
 
 # ----------------------------------------------------
-# HEALTH CHECK  (UptimeRobot यालाच ping करेल)
+# HEALTH CHECK  (UptimeRobot)
 # ----------------------------------------------------
 @app.get("/health")
 def health():
-  return {"ok": True}
+    return {"ok": True}
 
 
 # ----------------------------------------------------
@@ -192,6 +214,7 @@ def _on_ws_message(ws, message):
         print("WS RAW:", message)
         return
 
+    # इथे पुढे: 5-min OHLC बनवण्यासाठी parsing करू
     print("WS TICK:", data)
 
 
@@ -207,11 +230,10 @@ def _on_ws_open(ws):
     print("WS OPENED → sending subscription...")
 
     # Fyers docs: wss://api.fyers.in/socket/v2/data/
-    # Subscription example:
-    # { "symbol": ["NSE:TCS-EQ", "NSE:INFY-EQ"], "type": "symbolUpdate" }
+    # Subscription payload (symbolUpdate = live ticks)
     sub_payload = {
         "symbol": FYERS_SYMBOLS,
-        "type": "symbolUpdate"      # किंवा "lite" – तुला full OHLCV हवे असल्याने symbolUpdate
+        "type": "symbolUpdate"
     }
 
     try:
@@ -230,8 +252,7 @@ def start_fyers_ws_loop():
         print("❌ FYERS_ACCESS_TOKEN missing – WS client not started")
         return
 
-    # काही implementations header मध्ये Bearer token घेतात.
-    # जर इथे auth error आला, logs वरून फॉर्मॅट fine-tune करू.
+    # WebSocket headers – इथे auth घेतो
     headers = [
         f"Authorization: Bearer {ACCESS_TOKEN}",
         f"Client-Id: {CLIENT_ID or ''}"
