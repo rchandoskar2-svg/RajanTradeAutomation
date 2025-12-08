@@ -3,3 +3,4 @@ requests
 websocket-client
 fyers-apiv3
 setuptools
+nsetools
