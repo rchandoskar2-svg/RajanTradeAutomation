@@ -1,6 +1,6 @@
 # ============================================================
-# RajanTradeAutomation - Render Backend (AUTO LIVE ENGINE)
-# Version: 5.0 – Full Automatic: Universe Sync + Prefill + Strategy
+# RajanTradeAutomation - Main Backend (Render / Flask)
+# Version: 4.0 (Bias + Sector + Stock Engine + Candle engine foundation)
 # ============================================================
 
 from flask import Flask, request, jsonify
@@ -8,317 +8,216 @@ import requests
 import os
 import time
 import threading
-from datetime import datetime, time as dt_time, timedelta
+import traceback
 
-try:
-    from zoneinfo import ZoneInfo
-except:
-    from pytz import timezone as ZoneInfo
-
-# NSE Tools (Bias + Sector)
+# Optional nsetools (install in requirements for NSE quotes)
 try:
     from nsetools import Nse
     NSE_CLIENT = Nse()
-except:
+except Exception:
     NSE_CLIENT = None
 
 app = Flask(__name__)
 
-# ============================================================
-# 🔐 ENVIRONMENT VARIABLES  (YOU DO NOT EDIT THE CODE)
-# ============================================================
+# ------------------------------------------------------------
+# ENV VARIABLES (Render → Environment)
+# Must set these in Render dashboard (secure)
+# ------------------------------------------------------------
+WEBAPP_URL = os.getenv("WEBAPP_URL","").strip()   # Google Apps Script WebApp Exec URL (POST)
+INTERVAL_SECS = int(os.getenv("INTERVAL_SECS","1800"))  # default 1800
+MODE = os.getenv("MODE","PAPER").upper()  # PAPER or LIVE
 
-WEBAPP_URL = os.getenv("WEBAPP_URL", "").strip()
+# Fyers credentials (fill securely)
+FYERS_CLIENT_ID = os.getenv("FYERS_CLIENT_ID","").strip()
+FYERS_SECRET_KEY = os.getenv("FYERS_SECRET_KEY","").strip()
+FYERS_REDIRECT_URI = os.getenv("FYERS_REDIRECT_URI","").strip()
+FYERS_ACCESS_TOKEN = os.getenv("FYERS_ACCESS_TOKEN","").strip()
+FYERS_REFRESH_TOKEN = os.getenv("FYERS_REFRESH_TOKEN","").strip()
 
-# Your Fyers Keys (YOU MUST FILL THESE IN RENDER ENV)
-FYERS_CLIENT_ID = os.getenv("FYERS_CLIENT_ID", "").strip()
-FYERS_SECRET_KEY = os.getenv("FYERS_SECRET_KEY", "").strip()
-FYERS_ACCESS_TOKEN = os.getenv("FYERS_ACCESS_TOKEN", "").strip()
-FYERS_REFRESH_TOKEN = os.getenv("FYERS_REFRESH_TOKEN", "").strip()
-FYERS_TOKEN_REFRESH_URL = os.getenv("FYERS_TOKEN_REFRESH_URL", "").strip()
+# Chartink token if used
+CHARTINK_TOKEN = os.getenv("CHARTINK_TOKEN","").strip()
 
-FYERS_INSTRUMENTS_URL = os.getenv("FYERS_INSTRUMENTS_URL", "").strip()
-FYERS_HISTORICAL_URL = os.getenv("FYERS_HISTORICAL_URL", "").strip()
+# Bias threshold default fallback (in percent)
+BIAS_THRESHOLD = float(os.getenv("BIAS_THRESHOLD","60"))
 
-INTERVAL_SECS = int(os.getenv("INTERVAL_SECS", "1800"))  # default Rajan: 1800
-MODE = os.getenv("MODE", "PAPER").upper()
-
-TZ_NAME = os.getenv("TZ_NAME", "Asia/Kolkata")
-ZONE = ZoneInfo(TZ_NAME)
-
-START_TIME = dt_time(9, 0)
-PREFILL_START = dt_time(9, 15)
-PREFILL_END = dt_time(9, 30)
-STRATEGY_START = dt_time(9, 35)
-END_TIME = dt_time(15, 30)
-
-AUTO_UNIVERSE = os.getenv("AUTO_UNIVERSE", "TRUE") == "TRUE"
-UNIVERSE_SOURCE = os.getenv("UNIVERSE_SOURCE", "FYERS")
-
-# ============================================================
-# 🛠 COMMON helpers
-# ============================================================
-
-def now_ts():
-    return datetime.now(tz=ZONE)
-
-def call_webapp(action, payload=None):
+# ------------------------------------------------------------
+# helper: call Google WebApp (Apps Script)
+# ------------------------------------------------------------
+def call_webapp(action, payload=None, timeout=20):
     if payload is None:
         payload = {}
-
     if not WEBAPP_URL:
-        return {"ok": False, "error": "WEBAPP_URL not set"}
-
+        return {"ok": False, "error": "WEBAPP_URL not configured"}
+    body = {"action": action, "payload": payload}
     try:
-        r = requests.post(WEBAPP_URL, json={"action": action, "payload": payload}, timeout=30)
+        r = requests.post(WEBAPP_URL, json=body, timeout=timeout)
         try:
             return r.json()
-        except:
+        except Exception:
             return {"ok": True, "raw": r.text}
     except Exception as e:
         return {"ok": False, "error": str(e)}
 
-def log(msg):
-    print(f"[{now_ts().strftime('%H:%M:%S')}] {msg}")
+# ------------------------------------------------------------
+# Health routes
+# ------------------------------------------------------------
+@app.route("/", methods=["GET"])
+def root():
+    return "RajanTradeAutomation backend LIVE v4.0", 200
 
-# ============================================================
-# 🔄 FYERS TOKEN REFRESH
-# ============================================================
+@app.route("/ping", methods=["GET"])
+def ping():
+    return "PONG", 200
 
-def refresh_fyers_token():
-    global FYERS_ACCESS_TOKEN
+# ------------------------------------------------------------
+# Utility: compute bias from advances/declines with threshold
+# ------------------------------------------------------------
+def compute_bias_with_threshold(adv, dec, threshold_pct=60.0):
+    total = adv + dec
+    if total == 0:
+        return "NEUTRAL", 0.0
+    if adv > dec:
+        strength = (adv / total) * 100.0
+        bias = "BUY" if strength >= threshold_pct else "NEUTRAL"
+        return bias, strength
+    elif dec > adv:
+        strength = (dec / total) * 100.0
+        bias = "SELL" if strength >= threshold_pct else "NEUTRAL"
+        return bias, strength
+    else:
+        return "NEUTRAL", 50.0
 
-    if not (FYERS_REFRESH_TOKEN and FYERS_TOKEN_REFRESH_URL):
-        log("No refresh token configured — skipping refresh.")
-        return False
-
+# ------------------------------------------------------------
+# NSE helpers
+# ------------------------------------------------------------
+def get_nifty50_breadth():
+    if NSE_CLIENT is None:
+        return {"ok": False, "error": "NSE client not available (nsetools missing)"}
     try:
-        payload = {
-            "grant_type": "refresh_token",
-            "refresh_token": FYERS_REFRESH_TOKEN,
-            "client_id": FYERS_CLIENT_ID,
-            "client_secret": FYERS_SECRET_KEY
-        }
-
-        r = requests.post(FYERS_TOKEN_REFRESH_URL, data=payload, timeout=15)
-
-        if r.status_code != 200:
-            log("Refresh failed: " + r.text)
-            return False
-
-        j = r.json()
-        if "access_token" in j:
-            FYERS_ACCESS_TOKEN = j["access_token"]
-            log("✔ FYERS access token refreshed.")
-            return True
-
-        log("Unexpected refresh response: " + str(j))
-        return False
-
+        q = NSE_CLIENT.get_index_quote("NIFTY 50")
+        adv = int(q.get("advances", 0))
+        dec = int(q.get("declines", 0))
+        unc = int(q.get("unchanged", 0))
+        return {"ok": True, "advances": adv, "declines": dec, "unchanged": unc}
     except Exception as e:
-        log("Refresh error: " + str(e))
-        return False
+        return {"ok": False, "error": str(e)}
 
-# ============================================================
-# 🌐 UNIVERSE FETCH (AUTO)
-# ============================================================
+# ------------------------------------------------------------
+# fetch sectors (attempt using nsetools get_all_index_quote)
+# ------------------------------------------------------------
+SECTOR_INDEX_MAP = {
+    "NIFTY BANK": "BANK",
+    "NIFTY PSU BANK": "PSUBANK",
+    "NIFTY OIL & GAS": "OILGAS",
+    "NIFTY IT": "IT",
+    "NIFTY PHARMA": "PHARMA",
+    "NIFTY AUTO": "AUTO",
+    "NIFTY FMCG": "FMCG",
+    "NIFTY METAL": "METAL",
+    "NIFTY FIN SERVICE": "FIN",
+    "NIFTY REALTY": "REALTY",
+    "NIFTY MEDIA": "MEDIA",
+}
 
-def fetch_universe():
-    """
-    Primary: FYERS Instrument API
-    Backup: NSE sample list
-    """
-
-    rows = []
-
-    # 1) FYERS instruments (if URL + token available)
-    if FYERS_INSTRUMENTS_URL and FYERS_ACCESS_TOKEN:
-        try:
-            headers = {"Authorization": f"Bearer {FYERS_ACCESS_TOKEN}"}
-            r = requests.get(FYERS_INSTRUMENTS_URL, headers=headers, timeout=25)
-
-            if r.status_code == 200:
-                data = r.json().get("data", [])
-                for item in data:
-                    try:
-                        sym = item.get("symbol") or item.get("tradingsymbol")
-                        name = item.get("name") or sym
-                        sector = item.get("segment") or ""
-
-                        rows.append({
-                            "symbol": f"NSE:{sym}-EQ",
-                            "name": name,
-                            "sector": sector,
-                            "is_fno": True,
-                            "enabled": True
-                        })
-                    except:
-                        continue
-
-                log(f"✔ Universe loaded from FYERS: {len(rows)}")
-                return rows
-        except:
-            log("Fyers universe fetch failed, fallback…")
-
-    # 2) fallback
-    sample = [
-        {"symbol": "NSE:SBIN-EQ", "name": "SBI", "sector": "PSUBANK", "is_fno": True, "enabled": True},
-        {"symbol": "NSE:TCS-EQ", "name": "TCS", "sector": "IT", "is_fno": True, "enabled": True},
-        {"symbol": "NSE:RELIANCE-EQ", "name": "Reliance", "sector": "OILGAS", "is_fno": True, "enabled": True}
-    ]
-    log("⚠ Using fallback universe sample.")
-    return sample
-
-
-def sync_universe():
-    uni = fetch_universe()
-    return call_webapp("syncUniverse", {"universe": uni})
-
-# ============================================================
-# 🕒 9:15–9:30 PREFILL CANDLES
-# ============================================================
-
-def fetch_5m(symbol, start_ts, end_ts):
-    """
-    Fetch historical 5 minute candles.
-    Expected format:
-        [timestamp, open, high, low, close, volume]
-    """
-
-    if not (FYERS_HISTORICAL_URL and FYERS_ACCESS_TOKEN):
+def fetch_all_sector_quotes():
+    if NSE_CLIENT is None:
         return []
-
     try:
-        headers = {"Authorization": f"Bearer {FYERS_ACCESS_TOKEN}"}
-        params = {
-            "symbol": symbol,
-            "resolution": "5",
-            "date_format": "0",
-            "range_from": int(start_ts.timestamp()),
-            "range_to": int(end_ts.timestamp())
-        }
-
-        r = requests.get(FYERS_HISTORICAL_URL, headers=headers, params=params, timeout=25)
-
-        if r.status_code != 200:
-            return []
-
-        candles = []
-        data = r.json().get("candles", [])
-        idx = 1
-
-        for c in data:
-            candles.append({
-                "symbol": symbol,
-                "time": datetime.fromtimestamp(c[0], tz=ZONE).isoformat(),
-                "timeframe": "5m",
-                "open": c[1],
-                "high": c[2],
-                "low": c[3],
-                "close": c[4],
-                "volume": c[5],
-                "candle_index": idx,
-                "lowest_volume_so_far": 0,
-                "is_signal": False,
-                "direction": ""
-            })
-            idx += 1
-
-        return candles
-
-    except:
+        all_idx = NSE_CLIENT.get_all_index_quote()
+    except Exception:
         return []
+    sectors = []
+    for item in all_idx:
+        name = item.get("index") or item.get("indexSymbol") or item.get("name")
+        if not name:
+            continue
+        if name not in SECTOR_INDEX_MAP:
+            continue
+        code = SECTOR_INDEX_MAP[name]
+        chg = float(item.get("percentChange", 0.0) or 0.0)
+        adv = int(item.get("advances", 0) or 0)
+        dec = int(item.get("declines", 0) or 0)
+        sectors.append({"sector_name": name, "sector_code": code, "%chg": chg, "advances": adv, "declines": dec})
+    return sectors
 
+def build_sector_universe_and_top(bias, settings):
+    sectors = fetch_all_sector_quotes()
+    if not sectors:
+        return [], set()
+    if bias == "SELL":
+        sectors_sorted = sorted(sectors, key=lambda s: s["%chg"])
+        top_count = int(settings.get("SELL_SECTOR_COUNT", 2) or 2)
+    else:
+        sectors_sorted = sorted(sectors, key=lambda s: s["%chg"], reverse=True)
+        top_count = int(settings.get("BUY_SECTOR_COUNT", 2) or 2)
+    top_count = max(1, top_count)
+    top = sectors_sorted[:top_count]
+    top_names = {s["sector_name"] for s in top}
+    return sectors_sorted, top_names
 
-def prefill_candles(universe):
-    today = now_ts().date()
+def fetch_stocks_for_top_sectors(top_sector_names, bias, settings):
+    # This uses NSE index->members (nsetools doesn't easily provide index membership)
+    # We'll attempt per-sector scraping via nsetools (limited). If not available, return empty.
+    if NSE_CLIENT is None or not top_sector_names:
+        return []
+    max_up = float(settings.get("MAX_UP_PERCENT", 2.5))
+    max_down = float(settings.get("MAX_DOWN_PERCENT", -2.5))
+    all_rows = []
+    # Best-effort: nsetools doesn't provide per-sector members directly; this is placeholder.
+    # In practice, use a maintained universe list (Universe sheet or Chartink)
+    return all_rows
 
-    start = datetime.combine(today, PREFILL_START, tzinfo=ZONE)
-    end = datetime.combine(today, PREFILL_END, tzinfo=ZONE)
+def run_engine_once(settings, push_to_sheets=True):
+    if NSE_CLIENT is None:
+        return {"ok": False, "error": "NSE client not available (install nsetools)"}
+    breadth_resp = get_nifty50_breadth()
+    if not breadth_resp.get("ok"):
+        return breadth_resp
+    adv = breadth_resp["advances"]
+    dec = breadth_resp["declines"]
+    unc = breadth_resp.get("unchanged",0)
+    bias, strength = compute_bias_with_threshold(adv, dec, float(settings.get("BIAS_THRESHOLD_PERCENT", BIAS_THRESHOLD)))
+    sectors_all, top_sector_names = build_sector_universe_and_top(bias if bias!="NEUTRAL" else "BUY", settings)
+    stocks_all = fetch_stocks_for_top_sectors(top_sector_names, bias, settings)
+    if push_to_sheets:
+        call_webapp("updateSectorPerf", {"sectors": sectors_all})
+        call_webapp("updateStockList", {"stocks": stocks_all})
+    return {"ok": True, "bias": bias, "strength": strength, "advances": adv, "declines": dec, "unchanged": unc, "sectors_count": len(sectors_all), "top_sectors": list(top_sector_names), "stocks_count": len(stocks_all)}
 
-    batch = []
-    for row in universe:
-        sym = row["symbol"]
-        data = fetch_5m(sym, start, end)
-        batch.extend(data)
-
-        if len(batch) >= 200:
-            call_webapp("pushCandle", {"candles": batch})
-            batch = []
-
-    if batch:
-        call_webapp("pushCandle", {"candles": batch})
-
-    log("✔ Prefill complete.")
-
-# ============================================================
-# 🧠 DAILY ORCHESTRATION
-# ============================================================
-
-def orchestrate():
-    """
-    Fully automatic:
-        09:00 → token refresh + universe sync
-        09:15 → prefill
-        09:35 → strategy engine ready
-    """
-
-    last_run = None
-
+def engine_cycle():
     while True:
-        now = now_ts()
+        try:
+            print("ENGINE CYCLE START")
+            settings_resp = call_webapp("getSettings",{})
+            settings = settings_resp.get("settings",{}) if isinstance(settings_resp,dict) else {}
+            result = run_engine_once(settings, push_to_sheets=True)
+            print("Engine result:", result)
+        except Exception as e:
+            print("ENGINE ERROR:", str(e))
+            traceback.print_exc()
+        time.sleep(INTERVAL_SECS)
 
-        if now.weekday() >= 5:  # Sat/Sun
-            time.sleep(300)
-            continue
+def start_engine():
+    t = threading.Thread(target=engine_cycle, daemon=True)
+    t.start()
 
-        if last_run == now.date():
-            time.sleep(120)
-            continue
+start_engine()
 
-        if now.time() >= START_TIME:
-            log("=== Morning automation started ===")
-
-            refresh_fyers_token()
-            uni = fetch_universe()
-            sync_universe()
-
-            # wait till 9:15
-            while now_ts().time() < PREFILL_START:
-                time.sleep(20)
-
-            prefill_candles(uni)
-
-            log("=== Automation done for today ===")
-            last_run = now.date()
-
-        time.sleep(30)
-
-# ============================================================
-# ENGINE CYCLE (sector perf + stocklist)
-# ============================================================
-
+# DEBUG route to run one cycle without pushing to sheets
 @app.route("/engine/debug", methods=["GET"])
 def engine_debug():
-    return call_webapp("getSettings", {})
+    settings_resp = call_webapp("getSettings",{})
+    settings = settings_resp.get("settings",{}) if isinstance(settings_resp,dict) else {}
+    result = run_engine_once(settings, push_to_sheets=False)
+    return jsonify(result)
 
-# ============================================================
-# HTTP ROUTES
-# ============================================================
-
-@app.route("/", methods=["GET"])
-def home():
-    return "RajanTradeAutomation Backend 5.0 Running ✔", 200
-
-def start_threads():
-    threading.Thread(target=orchestrate, daemon=True).start()
-
-start_threads()
-
-# ============================================================
-# START FLASK
-# ============================================================
+# ------------------------------------------------------------
+# Simple test endpoints (as before) — keep for convenience
+# ------------------------------------------------------------
+@app.route("/test/pingwebapp", methods=["GET"])
+def test_ping_webapp():
+    return jsonify(call_webapp("ping",{}))
 
 if __name__ == "__main__":
-    port = int(os.getenv("PORT", "10000"))
+    port = int(os.getenv("PORT","10000"))
     app.run(host="0.0.0.0", port=port)
