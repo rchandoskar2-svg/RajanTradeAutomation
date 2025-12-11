@@ -1,6 +1,6 @@
 # ============================================================
 # RajanTradeAutomation - Main Backend (Render / Flask)
-# Version: 4.2 (Bias + Sector + Stock Engine + State + Skeleton Candles)
+# Version: 4.1 (Bias + Sector + Stock Engine + State)
 # ============================================================
 
 from flask import Flask, request, jsonify
@@ -8,13 +8,13 @@ import requests
 import os
 import time
 import threading
-from datetime import datetime, timedelta
 
 # ------------------------------------------------------------
 # NSE CLIENT (for NIFTY50 bias + sector data)
 # ------------------------------------------------------------
 try:
-    from nsetools import Nse   # pip install nsetools
+    # requirements.txt मध्ये: nsetools
+    from nsetools import Nse
     NSE_CLIENT = Nse()
 except Exception:
     NSE_CLIENT = None
@@ -27,33 +27,15 @@ app = Flask(__name__)
 WEBAPP_URL = os.getenv("WEBAPP_URL", "").strip()
 
 FYERS_CLIENT_ID = os.getenv("FYERS_CLIENT_ID", "").strip()
+FYERS_SECRET_KEY = os.getenv("FYERS_SECRET_KEY", "").strip()
+FYERS_REDIRECT_URI = os.getenv("FYERS_REDIRECT_URI", "").strip()
 FYERS_ACCESS_TOKEN = os.getenv("FYERS_ACCESS_TOKEN", "").strip()
 
-FYERS_INSTRUMENTS_URL = os.getenv("FYERS_INSTRUMENTS_URL", "").strip()
-FYERS_HISTORICAL_URL = os.getenv("FYERS_HISTORICAL_URL", "").strip()
+FYERS_INSTRUMENTS_URL = os.getenv("FYERS_INSTRUMENTS_URL", "https://api.fyers.in/api/v2/instruments").strip()
 
-INTERVAL_SECS = int(os.getenv("INTERVAL_SECS", "60"))
+INTERVAL_SECS = int(os.getenv("INTERVAL_SECS", "60"))  # ✅ default 60 sec
 MODE = os.getenv("MODE", "PAPER").upper()
 AUTO_UNIVERSE = os.getenv("AUTO_UNIVERSE", "TRUE").upper() == "TRUE"
-
-
-# ------------------------------------------------------------
-# TIME HELPERS (IST)
-# ------------------------------------------------------------
-def now_ist():
-    return datetime.utcnow() + timedelta(hours=5, minutes=30)
-
-
-def parse_hhmm_to_today_ist(hhmm, default_hour=11, default_min=0):
-    try:
-        parts = str(hhmm).split(":")
-        h = int(parts[0])
-        m = int(parts[1]) if len(parts) > 1 else 0
-    except Exception:
-        h, m = default_hour, default_min
-    now = now_ist()
-    return now.replace(hour=h, minute=m, second=0, microsecond=0)
-
 
 # ------------------------------------------------------------
 # COMMON HELPER → CALL WebApp.gs
@@ -76,13 +58,19 @@ def call_webapp(action, payload=None, timeout=20):
     except Exception as e:
         return {"ok": False, "error": str(e)}
 
+def set_state(key, value):
+    """State sheet मध्ये simple key/value लिहण्यासाठी helper."""
+    try:
+        call_webapp("setState", {"key": key, "value": str(value)})
+    except Exception as e:
+        print("set_state error:", e)
 
 # ------------------------------------------------------------
 # ROOT + HEALTH CHECK
 # ------------------------------------------------------------
 @app.route("/", methods=["GET"])
 def root():
-    return "RajanTradeAutomation backend is LIVE ⭐ v4.2", 200
+    return "RajanTradeAutomation backend is LIVE ⭐ v4.1", 200
 
 
 @app.route("/ping", methods=["GET"])
@@ -91,7 +79,7 @@ def ping():
 
 
 # ------------------------------------------------------------
-# SETTINGS FETCH
+# SETTINGS FETCH (Render → WebApp → Sheets)
 # ------------------------------------------------------------
 @app.route("/getSettings", methods=["GET"])
 def get_settings():
@@ -119,7 +107,6 @@ def fyers_redirect():
     """
     return html, 200
 
-
 # ============================================================
 #                  BIAS + SECTOR + STOCK ENGINE
 # ============================================================
@@ -138,9 +125,72 @@ SECTOR_INDEX_MAP = {
     "NIFTY MEDIA": "MEDIA",
 }
 
+# ------------------- Universe helper (AUTO_UNIVERSE) -------------------
+
+def fetch_fyers_fno_universe():
+    """
+    Fyers instruments API वापरून FnO universe तयार करण्याचा skeleton.
+    सध्या फक्त NIFTY MEDIA / NIFTY METAL सारख्या sectors मध्ये येणारे stocks
+    NSE_CLIENT कडूनच घेतो, त्यामुळे इथे heavy काम ठेवलेले नाही.
+    भविष्यात Fyers instruments वापरून FnO-only पडताळणी करू.
+    """
+    # Stub – सध्या NSE वरून मिळणाऱ्या stocks वर अवलंबून राहू.
+    return []
+
+def sync_universe_if_needed():
+    """
+    AUTO_UNIVERSE TRUE असेल तर Universe शीट भरतो.
+    तू हवे असल्यास AUTO_UNIVERSE=FALSE करून manually भरू शकतोस.
+    """
+    if not AUTO_UNIVERSE:
+        print("AUTO_UNIVERSE=FALSE → Universe manually managed.")
+        return
+
+    # सध्या: NSE sectors + त्यांच्या stocks वरून universe derive करू.
+    if NSE_CLIENT is None:
+        print("NSE client missing, cannot sync universe.")
+        return
+
+    try:
+        all_idx = NSE_CLIENT.get_all_index_quote()
+    except Exception as e:
+        print("sync_universe error:", e)
+        return
+
+    rows = []
+    for item in all_idx:
+        name = item.get("index") or item.get("indexSymbol")
+        if not name or name not in SECTOR_INDEX_MAP:
+            continue
+
+        sec_name = name
+        sec_code = SECTOR_INDEX_MAP[name]
+
+        try:
+            quotes = NSE_CLIENT.get_stock_quote_in_index(index=sec_name, include_index=False)
+        except Exception:
+            continue
+
+        for q in quotes:
+            sym = q.get("symbol")
+            if not sym:
+                continue
+            symbol_full = f"NSE:{sym}-EQ"
+            rows.append({
+                "symbol": symbol_full,
+                "name": sym,
+                "sector": sec_name,
+                "is_fno": True,   # TODO: Fyers instruments वापरून real FnO filter
+                "enabled": True,
+            })
+
+    payload = {"universe": rows}
+    res = call_webapp("syncUniverse", payload)
+    print("syncUniverse result:", res)
+
+# ------------------- Bias / sector / stocks -------------------
 
 def get_nifty50_breadth():
-    """NIFTY 50 advances / declines घेते."""
     if NSE_CLIENT is None:
         return {"ok": False, "error": "NSE client not available (nsetools missing)"}
 
@@ -149,27 +199,22 @@ def get_nifty50_breadth():
         adv = int(q.get("advances", 0))
         dec = int(q.get("declines", 0))
         unc = int(q.get("unchanged", 0))
-        return {"ok": True, "advances": adv, "declines": dec, "unchanged": unc}
+        return {
+            "ok": True,
+            "advances": adv,
+            "declines": dec,
+            "unchanged": unc,
+        }
     except Exception as e:
         return {"ok": False, "error": str(e)}
 
-
 def compute_bias(advances, declines):
-    """Bias rule based on NIFTY50 breadth."""
     if advances > declines:
         return "BUY"
     elif declines > advances:
         return "SELL"
     else:
         return "NEUTRAL"
-
-
-def compute_strength_percent(advances, declines):
-    total = advances + declines
-    if total <= 0:
-        return 0.0
-    return round(max(advances, declines) * 100.0 / float(total), 2)
-
 
 def fetch_all_sector_quotes():
     if NSE_CLIENT is None:
@@ -183,7 +228,9 @@ def fetch_all_sector_quotes():
     sectors = []
     for item in all_idx:
         name = item.get("index") or item.get("indexSymbol")
-        if not name or name not in SECTOR_INDEX_MAP:
+        if not name:
+            continue
+        if name not in SECTOR_INDEX_MAP:
             continue
 
         code = SECTOR_INDEX_MAP[name]
@@ -200,7 +247,6 @@ def fetch_all_sector_quotes():
         })
 
     return sectors
-
 
 def build_sector_universe_and_top(bias, settings):
     sectors = fetch_all_sector_quotes()
@@ -219,9 +265,7 @@ def build_sector_universe_and_top(bias, settings):
     top_names = {s["sector_name"] for s in top}
     return sectors_sorted, top_names
 
-
 def fetch_stocks_for_top_sectors(top_sector_names, bias, settings):
-    """Top sector मधील stocks + %chg filter."""
     if NSE_CLIENT is None or not top_sector_names:
         return []
 
@@ -266,50 +310,20 @@ def fetch_stocks_for_top_sectors(top_sector_names, bias, settings):
 
     return all_rows
 
-
-def maybe_push_universe_to_sheets(settings):
-    """AUTO_UNIVERSE असल्यास Universe sheet भरून दे (FnO indices मधील stocks)."""
-    if not AUTO_UNIVERSE or NSE_CLIENT is None:
-        return
-
-    sectors = fetch_all_sector_quotes()
-    universe_rows = []
-
-    for sec in sectors:
-        index_name = sec["sector_name"]
-        try:
-            quotes = NSE_CLIENT.get_stock_quote_in_index(index=index_name, include_index=False)
-        except Exception:
-            continue
-
-        for q in quotes:
-            sym = q.get("symbol")
-            if not sym:
-                continue
-            universe_rows.append({
-                "symbol": f"NSE:{sym}-EQ",
-                "name": sym,
-                "sector": index_name,
-                "is_fno": True,       # simple assumption
-                "enabled": True,
-            })
-
-    if universe_rows:
-        call_webapp("syncUniverse", {"universe": universe_rows})
-
+def compute_bias_strength(advances, declines, bias):
+    total = advances + declines
+    if total <= 0 or bias not in ("BUY", "SELL"):
+        return 0.0
+    if bias == "BUY":
+        return advances * 100.0 / total
+    else:
+        return declines * 100.0 / total
 
 def run_engine_once(settings, push_to_sheets=True):
-    """
-    Full cycle:
-      1) NIFTY50 breadth → bias + strength
-      2) Sector perf → sort + top sectors
-      3) Top sectors मधील stocks
-      4) Sheets update + State sheet मध्ये bias info
-    """
     if NSE_CLIENT is None:
         return {"ok": False, "error": "NSE client not available (install nsetools)"}
 
-    # --- 1) breadth ---
+    # --- 1) NIFTY 50 breadth ---
     breadth = get_nifty50_breadth()
     if not breadth.get("ok"):
         return breadth
@@ -317,117 +331,81 @@ def run_engine_once(settings, push_to_sheets=True):
     adv = breadth["advances"]
     dec = breadth["declines"]
     bias = compute_bias(adv, dec)
-    strength = compute_strength_percent(adv, dec)
+    strength = compute_bias_strength(adv, dec, bias)
+    threshold = float(settings.get("BIAS_THRESHOLD_PERCENT", 60) or 60)
 
-    threshold = float(settings.get("BIAS_THRESHOLD_PERCENT", 60) or 60.0)
-    max_trade_time_str = str(settings.get("MAX_TRADE_TIME", "11:00"))
-    max_trades_per_day = int(settings.get("MAX_TRADES_PER_DAY", 5) or 5)
+    primary_enabled = str(settings.get("ENABLE_PRIMARY_STRATEGY", "TRUE")).upper() == "TRUE"
 
-    max_trade_dt = parse_hhmm_to_today_ist(max_trade_time_str, 11, 0)
-    time_ok = now_ist() <= max_trade_dt
-    bias_ok = strength >= threshold and bias != "NEUTRAL"
+    # Bias status State sheet मध्ये लिहू
+    status_str = f"{bias}|{strength:.1f}|{threshold:.1f}"
+    if strength >= threshold and bias in ("BUY", "SELL") and primary_enabled:
+        set_state("BIAS_STATUS", "OK|" + status_str)
+    else:
+        set_state("BIAS_STATUS", "WEAK_OR_OFF|" + status_str)
 
-    # --- 2) Universe auto fill (once per run; हलकं आहे) ---
-    maybe_push_universe_to_sheets(settings)
-
-    # --- 3) Sector + stocks ---
+    # --- 2) Sector universe + top sectors ---
     sectors_all, top_sector_names = build_sector_universe_and_top(bias, settings)
+
+    # --- 3) Stocks for top sectors ---
     stocks_all = fetch_stocks_for_top_sectors(top_sector_names, bias, settings)
 
+    # --- 4) Push to Sheets ---
     if push_to_sheets:
         call_webapp("updateSectorPerf", {"sectors": sectors_all})
         call_webapp("updateStockList", {"stocks": stocks_all})
 
-        # State sheet मध्ये bias + strength + constraints
-        state_items = [
-            {"key": "BREADTH_ADVANCES", "value": adv},
-            {"key": "BREADTH_DECLINES", "value": dec},
-            {"key": "BREADTH_UNCHANGED", "value": breadth.get("unchanged", 0)},
-            {"key": "BREADTH_BIAS", "value": bias},
-            {"key": "BREADTH_STRENGTH", "value": strength},
-            {"key": "BIAS_THRESHOLD_PERCENT", "value": threshold},
-            {"key": "MAX_TRADE_TIME", "value": max_trade_time_str},
-            {"key": "MAX_TRADES_PER_DAY", "value": max_trades_per_day},
-            {"key": "BIAS_OK_FOR_STRATEGY", "value": str(bias_ok)},
-            {"key": "TIME_OK_FOR_ENTRY", "value": str(time_ok)},
-        ]
-        call_webapp("pushState", {"items": state_items})
+    max_trade_time = str(settings.get("MAX_TRADE_TIME", "11:00"))
+    max_trades_per_day = int(settings.get("MAX_TRADES_PER_DAY", 5) or 5)
 
     return {
         "ok": True,
+        "bias": bias,
         "advances": adv,
         "declines": dec,
         "unchanged": breadth.get("unchanged", 0),
-        "bias": bias,
         "strength": strength,
         "threshold": threshold,
-        "max_trade_time": max_trade_dt.isoformat(),
-        "max_trades_per_day": max_trades_per_day,
         "sectors_count": len(sectors_all),
-        "stocks_count": len(stocks_all),
         "top_sectors": list(top_sector_names),
+        "stocks_count": len(stocks_all),
+        "max_trade_time": max_trade_time,
+        "max_trades_per_day": max_trades_per_day,
     }
 
-
-# ============================================================
-#        SKELETON – LIVE CANDLE ENGINE (to be completed)
-# ============================================================
-
-def fetch_5min_candles_for_symbols(symbols):
-    """
-    TODO: इथे Fyers history / websocket वापरून
-    live + historical 5-min candles आणायचे आहेत.
-    सध्या stub → रिकामी list परत करतो, म्हणजे कुठलीही
-    candle Sheets मध्ये जाणार नाही (safe).
-    """
-    _ = symbols  # unused
-    return []
-
-
-def run_candle_engine_once(settings):
-    """
-    पुढच्या स्टेजला:
-      - StockList मधील Selected=TRUE stocks घ्यायचे
-      - प्रत्येकासाठी first 3 candles + पुढील candles
-      - Lowest Volume so far → signal candle
-      - pushCandle + pushSignal + (नंतर) pushTradeEntry
-    आत्तासाठी फक्त structure + log.
-    """
-    # TODO: पुढच्या टप्प्यात implement करु
-    return {"ok": True, "implemented": False}
-
-
-# ============================================================
-#                    MAIN ENGINE LOOP
-# ============================================================
+# ------------------- ENGINE LOOP -------------------
 
 def engine_cycle():
+    """
+    Background engine: INTERVAL_SECS दराने चालू राहील.
+    1) Universe auto-sync (AUTO_UNIVERSE = TRUE)
+    2) Bias + sectors + stocks update
+    """
+    # पहिल्या रनला universe try कर
+    try:
+        sync_universe_if_needed()
+    except Exception as e:
+        print("Universe sync error:", e)
+
     while True:
         try:
-            print("🔄 ENGINE CYCLE STARTED")
+            print("🔄 ENGINE CYCLE STARTED, interval:", INTERVAL_SECS)
+
             settings_resp = call_webapp("getSettings", {})
             settings = settings_resp.get("settings", {}) if isinstance(settings_resp, dict) else {}
 
-            result_bias = run_engine_once(settings, push_to_sheets=True)
-            print("⚙ Bias/Sector/Stock result:", result_bias)
-
-            # पुढच्या स्टेपला candle engine इथे call करू:
-            # result_candles = run_candle_engine_once(settings)
-            # print("🕒 Candle engine result:", result_candles)
+            result = run_engine_once(settings, push_to_sheets=True)
+            print("⚙ Engine result:", result)
 
         except Exception as e:
             print("❌ ENGINE ERROR:", e)
 
         time.sleep(INTERVAL_SECS)
 
-
 def start_engine():
     t = threading.Thread(target=engine_cycle, daemon=True)
     t.start()
 
-
 start_engine()
-
 
 # ------------------------------------------------------------
 # DEBUG ROUTES
@@ -439,7 +417,6 @@ def engine_debug():
     result = run_engine_once(settings, push_to_sheets=False)
     return jsonify(result)
 
-
 @app.route("/engine/run-now", methods=["GET"])
 def engine_run_now():
     settings_resp = call_webapp("getSettings", {})
@@ -447,12 +424,10 @@ def engine_run_now():
     result = run_engine_once(settings, push_to_sheets=True)
     return jsonify(result)
 
-
 # ============================================================
-#                    TEST SUITE (unchanged)
+#                    TEST SUITE (same as before)
 # ============================================================
 
-# ---------- 1) UNIVERSE TEST ----------
 @app.route("/test/syncUniverse", methods=["GET"])
 def test_sync_universe():
     payload = {
@@ -483,13 +458,132 @@ def test_sync_universe():
     result = call_webapp("syncUniverse", payload)
     return jsonify(result)
 
+@app.route("/test/updateSectorPerf", methods=["GET"])
+@app.route("/test/sectorPerf", methods=["GET"])
+def test_update_sector_perf():
+    payload = {
+        "sectors": [
+            {
+                "sector_name": "PSU BANK",
+                "sector_code": "PSUBANK",
+                "%chg": 1.02,
+                "advances": 9,
+                "declines": 3
+            },
+            {
+                "sector_name": "NIFTY OIL & GAS",
+                "sector_code": "OILGAS",
+                "%chg": 0.20,
+                "advances": 7,
+                "declines": 5
+            }
+        ]
+    }
+    result = call_webapp("updateSectorPerf", payload)
+    return jsonify(result)
 
-# (बाकी test routes – sector / stocks / candles / signals / trades – तशाच ठेवू शकतोस,
-# हवे असल्यास इथेच ठेव किंवा आधीसारख्या main.py मधून copy करून टाक.)
+@app.route("/test/updateStockList", methods=["GET"])
+@app.route("/test/stocks", methods=["GET"])
+def test_update_stock_list():
+    payload = {
+        "stocks": [
+            {
+                "symbol": "NSE:SBIN-EQ",
+                "direction_bias": "BUY",
+                "sector": "PSU BANK",
+                "%chg": 1.25,
+                "ltp": 622.40,
+                "volume": 1250000,
+                "selected": True
+            }
+        ]
+    }
+    result = call_webapp("updateStockList", payload)
+    return jsonify(result)
+
+@app.route("/test/pushCandle", methods=["GET"])
+@app.route("/test/candles", methods=["GET"])
+def test_push_candle():
+    payload = {
+        "candles": [
+            {
+                "symbol": "NSE:SBIN-EQ",
+                "time": "2025-12-05T09:35:00+05:30",
+                "timeframe": "5m",
+                "open": 621.00,
+                "high": 623.00,
+                "low": 620.50,
+                "close": 622.40,
+                "volume": 155000,
+                "candle_index": 4,
+                "lowest_volume_so_far": 155000,
+                "is_signal": False,
+                "direction": "BUY"
+            }
+        ]
+    }
+    result = call_webapp("pushCandle", payload)
+    return jsonify(result)
+
+@app.route("/test/pushSignal", methods=["GET"])
+@app.route("/test/signal", methods=["GET"])
+def test_push_signal():
+    payload = {
+        "signals": [
+            {
+                "symbol": "NSE:SBIN-EQ",
+                "direction": "BUY",
+                "signal_time": "2025-12-05T09:36:00+05:30",
+                "candle_index": 4,
+                "open": 621.00,
+                "high": 623.00,
+                "low": 620.50,
+                "close": 622.40,
+                "entry_price": 623.00,
+                "sl": 620.50,
+                "target_price": 628.00,
+                "risk_per_share": 2.50,
+                "rr": 2.0,
+                "status": "PENDING"
+            }
+        ]
+    }
+    result = call_webapp("pushSignal", payload)
+    return jsonify(result)
+
+@app.route("/test/pushTradeEntry", methods=["GET"])
+@app.route("/test/entry", methods=["GET"])
+def test_push_trade_entry():
+    payload = {
+        "symbol": "NSE:SBIN-EQ",
+        "direction": "BUY",
+        "entry_price": 623.00,
+        "sl": 620.50,
+        "target_price": 628.00,
+        "qty_total": 100,
+        "entry_time": "2025-12-05T09:37:10+05:30"
+    }
+    result = call_webapp("pushTradeEntry", payload)
+    return jsonify(result)
+
+@app.route("/test/pushTradeExit", methods=["GET"])
+@app.route("/test/exit", methods=["GET"])
+def test_push_trade_exit():
+    payload = {
+        "symbol": "NSE:SBIN-EQ",
+        "exit_type": "PARTIAL",
+        "exit_qty": 50,
+        "exit_price": 625.50,
+        "exit_time": "2025-12-05T10:10:00+05:30",
+        "pnl": 1250.00,
+        "status": "PARTIAL"
+    }
+    result = call_webapp("pushTradeExit", payload)
+    return jsonify(result)
 
 # ------------------------------------------------------------
 # FLASK ENTRY POINT
 # ------------------------------------------------------------
 if __name__ == "__main__":
-  port = int(os.getenv("PORT", "10000"))
-  app.run(host="0.0.0.0", port=port)
+    port = int(os.getenv("PORT", "10000"))
+    app.run(host="0.0.0.0", port=port)
