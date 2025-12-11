@@ -1,6 +1,6 @@
 # ============================================================
 # RajanTradeAutomation - Main Backend (Render / Flask)
-# Version: 4.1 (Bias + Sector + Stock Engine + State)
+# Version: 4.1 (patched) — Bias + Sector + Stock Engine + State
 # ============================================================
 
 from flask import Flask, request, jsonify
@@ -13,7 +13,6 @@ import threading
 # NSE CLIENT (for NIFTY50 bias + sector data)
 # ------------------------------------------------------------
 try:
-    # requirements.txt मध्ये: nsetools
     from nsetools import Nse
     NSE_CLIENT = Nse()
 except Exception:
@@ -32,8 +31,9 @@ FYERS_REDIRECT_URI = os.getenv("FYERS_REDIRECT_URI", "").strip()
 FYERS_ACCESS_TOKEN = os.getenv("FYERS_ACCESS_TOKEN", "").strip()
 
 FYERS_INSTRUMENTS_URL = os.getenv("FYERS_INSTRUMENTS_URL", "https://api.fyers.in/api/v2/instruments").strip()
+FYERS_HISTORICAL_URL = os.getenv("FYERS_HISTORICAL_URL", "https://api.fyers.in/data-rest/v2/history").strip()
 
-INTERVAL_SECS = int(os.getenv("INTERVAL_SECS", "60"))  # ✅ default 60 sec
+INTERVAL_SECS = int(os.getenv("INTERVAL_SECS", "60"))  # default 60 sec
 MODE = os.getenv("MODE", "PAPER").upper()
 AUTO_UNIVERSE = os.getenv("AUTO_UNIVERSE", "TRUE").upper() == "TRUE"
 
@@ -43,12 +43,9 @@ AUTO_UNIVERSE = os.getenv("AUTO_UNIVERSE", "TRUE").upper() == "TRUE"
 def call_webapp(action, payload=None, timeout=20):
     if payload is None:
         payload = {}
-
     if not WEBAPP_URL:
         return {"ok": False, "error": "WEBAPP_URL not configured"}
-
     body = {"action": action, "payload": payload}
-
     try:
         res = requests.post(WEBAPP_URL, json=body, timeout=timeout)
         try:
@@ -59,24 +56,25 @@ def call_webapp(action, payload=None, timeout=20):
         return {"ok": False, "error": str(e)}
 
 def set_state(key, value):
-    """State sheet मध्ये simple key/value लिहण्यासाठी helper."""
+    """Write simple key/value to State sheet via WebApp pushState action."""
     try:
-        call_webapp("setState", {"key": key, "value": str(value)})
+        payload = {"items": [{"key": key, "value": str(value)}]}
+        # Use pushState (WebApp has pushState handler). Also accept setState if needed.
+        return call_webapp("pushState", payload)
     except Exception as e:
         print("set_state error:", e)
+        return {"ok": False, "error": str(e)}
 
 # ------------------------------------------------------------
 # ROOT + HEALTH CHECK
 # ------------------------------------------------------------
 @app.route("/", methods=["GET"])
 def root():
-    return "RajanTradeAutomation backend is LIVE ⭐ v4.1", 200
-
+    return "RajanTradeAutomation backend is LIVE ⭐ v4.1 (patched)", 200
 
 @app.route("/ping", methods=["GET"])
 def ping():
     return "PONG", 200
-
 
 # ------------------------------------------------------------
 # SETTINGS FETCH (Render → WebApp → Sheets)
@@ -86,7 +84,6 @@ def get_settings():
     result = call_webapp("getSettings", {})
     return jsonify(result)
 
-
 # ------------------------------------------------------------
 # FYERS OAUTH REDIRECT (unchanged)
 # ------------------------------------------------------------
@@ -95,15 +92,13 @@ def fyers_redirect():
     status = request.args.get("s") or request.args.get("status", "")
     auth_code = request.args.get("auth_code", "")
     state = request.args.get("state", "")
-
     html = f"""
     <h2>Fyers Redirect Handler</h2>
     <p>Status: <b>{status}</b></p>
     <p>State: <b>{state}</b></p>
     <p><b>Auth Code (copy & save safely):</b></p>
     <textarea rows="5" cols="120">{auth_code}</textarea>
-    <p>हा code कुणालाही share करू नकोस. Render env मधील
-    FYERS_ACCESS_TOKEN तयार करताना याचा वापर कर.</p>
+    <p>Do NOT share this code. Use it to obtain tokens for FYERS access token refresh flow.</p>
     """
     return html, 200
 
@@ -125,52 +120,32 @@ SECTOR_INDEX_MAP = {
     "NIFTY MEDIA": "MEDIA",
 }
 
-# ------------------- Universe helper (AUTO_UNIVERSE) -------------------
-
 def fetch_fyers_fno_universe():
-    """
-    Fyers instruments API वापरून FnO universe तयार करण्याचा skeleton.
-    सध्या फक्त NIFTY MEDIA / NIFTY METAL सारख्या sectors मध्ये येणारे stocks
-    NSE_CLIENT कडूनच घेतो, त्यामुळे इथे heavy काम ठेवलेले नाही.
-    भविष्यात Fyers instruments वापरून FnO-only पडताळणी करू.
-    """
-    # Stub – सध्या NSE वरून मिळणाऱ्या stocks वर अवलंबून राहू.
+    # Optional: use FYERS_INSTRUMENTS_URL to fetch FnO universe (stub)
     return []
 
 def sync_universe_if_needed():
-    """
-    AUTO_UNIVERSE TRUE असेल तर Universe शीट भरतो.
-    तू हवे असल्यास AUTO_UNIVERSE=FALSE करून manually भरू शकतोस.
-    """
     if not AUTO_UNIVERSE:
         print("AUTO_UNIVERSE=FALSE → Universe manually managed.")
         return
-
-    # सध्या: NSE sectors + त्यांच्या stocks वरून universe derive करू.
     if NSE_CLIENT is None:
         print("NSE client missing, cannot sync universe.")
         return
-
     try:
         all_idx = NSE_CLIENT.get_all_index_quote()
     except Exception as e:
         print("sync_universe error:", e)
         return
-
     rows = []
     for item in all_idx:
         name = item.get("index") or item.get("indexSymbol")
         if not name or name not in SECTOR_INDEX_MAP:
             continue
-
         sec_name = name
-        sec_code = SECTOR_INDEX_MAP[name]
-
         try:
             quotes = NSE_CLIENT.get_stock_quote_in_index(index=sec_name, include_index=False)
         except Exception:
             continue
-
         for q in quotes:
             sym = q.get("symbol")
             if not sym:
@@ -180,31 +155,22 @@ def sync_universe_if_needed():
                 "symbol": symbol_full,
                 "name": sym,
                 "sector": sec_name,
-                "is_fno": True,   # TODO: Fyers instruments वापरून real FnO filter
+                "is_fno": True,
                 "enabled": True,
             })
-
     payload = {"universe": rows}
     res = call_webapp("syncUniverse", payload)
     print("syncUniverse result:", res)
 
-# ------------------- Bias / sector / stocks -------------------
-
 def get_nifty50_breadth():
     if NSE_CLIENT is None:
         return {"ok": False, "error": "NSE client not available (nsetools missing)"}
-
     try:
         q = NSE_CLIENT.get_index_quote("NIFTY 50")
         adv = int(q.get("advances", 0))
         dec = int(q.get("declines", 0))
         unc = int(q.get("unchanged", 0))
-        return {
-            "ok": True,
-            "advances": adv,
-            "declines": dec,
-            "unchanged": unc,
-        }
+        return {"ok": True, "advances": adv, "declines": dec, "unchanged": unc}
     except Exception as e:
         return {"ok": False, "error": str(e)}
 
@@ -219,47 +185,32 @@ def compute_bias(advances, declines):
 def fetch_all_sector_quotes():
     if NSE_CLIENT is None:
         return []
-
     try:
         all_idx = NSE_CLIENT.get_all_index_quote()
     except Exception:
         return []
-
     sectors = []
     for item in all_idx:
         name = item.get("index") or item.get("indexSymbol")
-        if not name:
+        if not name or name not in SECTOR_INDEX_MAP:
             continue
-        if name not in SECTOR_INDEX_MAP:
-            continue
-
         code = SECTOR_INDEX_MAP[name]
-        chg = float(item.get("percentChange", 0.0))
+        chg = float(item.get("percentChange", 0.0) or 0.0)
         adv = int(item.get("advances", 0) or 0)
         dec = int(item.get("declines", 0) or 0)
-
-        sectors.append({
-            "sector_name": name,
-            "sector_code": code,
-            "%chg": chg,
-            "advances": adv,
-            "declines": dec,
-        })
-
+        sectors.append({"sector_name": name, "sector_code": code, "%chg": chg, "advances": adv, "declines": dec})
     return sectors
 
 def build_sector_universe_and_top(bias, settings):
     sectors = fetch_all_sector_quotes()
     if not sectors:
         return [], set()
-
     if bias == "SELL":
         sectors_sorted = sorted(sectors, key=lambda s: s["%chg"])
         top_count = int(settings.get("SELL_SECTOR_COUNT", 2) or 2)
     else:
         sectors_sorted = sorted(sectors, key=lambda s: s["%chg"], reverse=True)
         top_count = int(settings.get("BUY_SECTOR_COUNT", 2) or 2)
-
     top_count = max(1, top_count)
     top = sectors_sorted[:top_count]
     top_names = {s["sector_name"] for s in top}
@@ -268,27 +219,30 @@ def build_sector_universe_and_top(bias, settings):
 def fetch_stocks_for_top_sectors(top_sector_names, bias, settings):
     if NSE_CLIENT is None or not top_sector_names:
         return []
-
     max_up = float(settings.get("MAX_UP_PERCENT", 2.5))
     max_down = float(settings.get("MAX_DOWN_PERCENT", -2.5))
-
     all_rows = []
-
     for sec_name in top_sector_names:
         try:
             quotes = NSE_CLIENT.get_stock_quote_in_index(index=sec_name, include_index=False)
         except Exception:
             continue
-
         for q in quotes:
             sym = q.get("symbol")
             if not sym:
                 continue
-
-            pchg = float(q.get("pChange", 0.0) or 0.0)
-            ltp = float(q.get("ltp", 0.0) or 0.0)
-            vol = int(q.get("totalTradedVolume", 0) or 0)
-
+            try:
+                pchg = float(q.get("pChange", 0.0) or 0.0)
+            except Exception:
+                pchg = 0.0
+            try:
+                ltp = float(q.get("ltp", 0.0) or 0.0)
+            except Exception:
+                ltp = 0.0
+            try:
+                vol = int(q.get("totalTradedVolume", 0) or 0)
+            except Exception:
+                vol = 0
             selected = False
             if bias == "BUY":
                 if pchg > 0 and pchg <= max_up:
@@ -296,7 +250,6 @@ def fetch_stocks_for_top_sectors(top_sector_names, bias, settings):
             elif bias == "SELL":
                 if pchg < 0 and pchg >= max_down:
                     selected = True
-
             row = {
                 "symbol": f"NSE:{sym}-EQ",
                 "direction_bias": bias,
@@ -307,7 +260,6 @@ def fetch_stocks_for_top_sectors(top_sector_names, bias, settings):
                 "selected": selected,
             }
             all_rows.append(row)
-
     return all_rows
 
 def compute_bias_strength(advances, declines, bias):
@@ -322,41 +274,27 @@ def compute_bias_strength(advances, declines, bias):
 def run_engine_once(settings, push_to_sheets=True):
     if NSE_CLIENT is None:
         return {"ok": False, "error": "NSE client not available (install nsetools)"}
-
-    # --- 1) NIFTY 50 breadth ---
     breadth = get_nifty50_breadth()
     if not breadth.get("ok"):
         return breadth
-
     adv = breadth["advances"]
     dec = breadth["declines"]
     bias = compute_bias(adv, dec)
     strength = compute_bias_strength(adv, dec, bias)
     threshold = float(settings.get("BIAS_THRESHOLD_PERCENT", 60) or 60)
-
     primary_enabled = str(settings.get("ENABLE_PRIMARY_STRATEGY", "TRUE")).upper() == "TRUE"
-
-    # Bias status State sheet मध्ये लिहू
     status_str = f"{bias}|{strength:.1f}|{threshold:.1f}"
     if strength >= threshold and bias in ("BUY", "SELL") and primary_enabled:
         set_state("BIAS_STATUS", "OK|" + status_str)
     else:
         set_state("BIAS_STATUS", "WEAK_OR_OFF|" + status_str)
-
-    # --- 2) Sector universe + top sectors ---
     sectors_all, top_sector_names = build_sector_universe_and_top(bias, settings)
-
-    # --- 3) Stocks for top sectors ---
     stocks_all = fetch_stocks_for_top_sectors(top_sector_names, bias, settings)
-
-    # --- 4) Push to Sheets ---
     if push_to_sheets:
         call_webapp("updateSectorPerf", {"sectors": sectors_all})
         call_webapp("updateStockList", {"stocks": stocks_all})
-
     max_trade_time = str(settings.get("MAX_TRADE_TIME", "11:00"))
     max_trades_per_day = int(settings.get("MAX_TRADES_PER_DAY", 5) or 5)
-
     return {
         "ok": True,
         "bias": bias,
@@ -375,30 +313,19 @@ def run_engine_once(settings, push_to_sheets=True):
 # ------------------- ENGINE LOOP -------------------
 
 def engine_cycle():
-    """
-    Background engine: INTERVAL_SECS दराने चालू राहील.
-    1) Universe auto-sync (AUTO_UNIVERSE = TRUE)
-    2) Bias + sectors + stocks update
-    """
-    # पहिल्या रनला universe try कर
     try:
         sync_universe_if_needed()
     except Exception as e:
         print("Universe sync error:", e)
-
     while True:
         try:
             print("🔄 ENGINE CYCLE STARTED, interval:", INTERVAL_SECS)
-
             settings_resp = call_webapp("getSettings", {})
             settings = settings_resp.get("settings", {}) if isinstance(settings_resp, dict) else {}
-
             result = run_engine_once(settings, push_to_sheets=True)
             print("⚙ Engine result:", result)
-
         except Exception as e:
             print("❌ ENGINE ERROR:", e)
-
         time.sleep(INTERVAL_SECS)
 
 def start_engine():
@@ -424,160 +351,63 @@ def engine_run_now():
     result = run_engine_once(settings, push_to_sheets=True)
     return jsonify(result)
 
-# ============================================================
-#                    TEST SUITE (same as before)
-# ============================================================
-
+# ------------------------------------------------------------
+# TEST SUITE (unchanged)
+# ------------------------------------------------------------
 @app.route("/test/syncUniverse", methods=["GET"])
 def test_sync_universe():
     payload = {
         "universe": [
-            {
-                "symbol": "NSE:SBIN-EQ",
-                "name": "State Bank of India",
-                "sector": "PSU BANK",
-                "is_fno": True,
-                "enabled": True
-            },
-            {
-                "symbol": "NSE:TCS-EQ",
-                "name": "TCS",
-                "sector": "IT",
-                "is_fno": True,
-                "enabled": True
-            },
-            {
-                "symbol": "NSE:RELIANCE-EQ",
-                "name": "Reliance Industries",
-                "sector": "OIL & GAS",
-                "is_fno": True,
-                "enabled": True
-            }
+            {"symbol": "NSE:SBIN-EQ", "name": "State Bank of India", "sector": "PSU BANK", "is_fno": True, "enabled": True},
+            {"symbol": "NSE:TCS-EQ", "name": "TCS", "sector": "IT", "is_fno": True, "enabled": True},
+            {"symbol": "NSE:RELIANCE-EQ", "name": "Reliance Industries", "sector": "OIL & GAS", "is_fno": True, "enabled": True}
         ]
     }
     result = call_webapp("syncUniverse", payload)
     return jsonify(result)
 
 @app.route("/test/updateSectorPerf", methods=["GET"])
-@app.route("/test/sectorPerf", methods=["GET"])
 def test_update_sector_perf():
-    payload = {
-        "sectors": [
-            {
-                "sector_name": "PSU BANK",
-                "sector_code": "PSUBANK",
-                "%chg": 1.02,
-                "advances": 9,
-                "declines": 3
-            },
-            {
-                "sector_name": "NIFTY OIL & GAS",
-                "sector_code": "OILGAS",
-                "%chg": 0.20,
-                "advances": 7,
-                "declines": 5
-            }
-        ]
-    }
+    payload = {"sectors": [
+        {"sector_name": "PSU BANK", "sector_code": "PSUBANK", "%chg": 1.02, "advances": 9, "declines": 3},
+        {"sector_name": "NIFTY OIL & GAS", "sector_code": "OILGAS", "%chg": 0.20, "advances": 7, "declines": 5}
+    ]}
     result = call_webapp("updateSectorPerf", payload)
     return jsonify(result)
 
 @app.route("/test/updateStockList", methods=["GET"])
-@app.route("/test/stocks", methods=["GET"])
 def test_update_stock_list():
-    payload = {
-        "stocks": [
-            {
-                "symbol": "NSE:SBIN-EQ",
-                "direction_bias": "BUY",
-                "sector": "PSU BANK",
-                "%chg": 1.25,
-                "ltp": 622.40,
-                "volume": 1250000,
-                "selected": True
-            }
-        ]
-    }
+    payload = {"stocks": [
+        {"symbol": "NSE:SBIN-EQ", "direction_bias": "BUY", "sector": "PSU BANK", "%chg": 1.25, "ltp": 622.40, "volume": 1250000, "selected": True}
+    ]}
     result = call_webapp("updateStockList", payload)
     return jsonify(result)
 
 @app.route("/test/pushCandle", methods=["GET"])
-@app.route("/test/candles", methods=["GET"])
 def test_push_candle():
-    payload = {
-        "candles": [
-            {
-                "symbol": "NSE:SBIN-EQ",
-                "time": "2025-12-05T09:35:00+05:30",
-                "timeframe": "5m",
-                "open": 621.00,
-                "high": 623.00,
-                "low": 620.50,
-                "close": 622.40,
-                "volume": 155000,
-                "candle_index": 4,
-                "lowest_volume_so_far": 155000,
-                "is_signal": False,
-                "direction": "BUY"
-            }
-        ]
-    }
+    payload = {"candles": [
+        {"symbol": "NSE:SBIN-EQ", "time": "2025-12-05T09:35:00+05:30", "timeframe": "5m", "open": 621.00, "high": 623.00, "low": 620.50, "close": 622.40, "volume": 155000, "candle_index": 4, "lowest_volume_so_far": 155000, "is_signal": False, "direction": "BUY"}
+    ]}
     result = call_webapp("pushCandle", payload)
     return jsonify(result)
 
 @app.route("/test/pushSignal", methods=["GET"])
-@app.route("/test/signal", methods=["GET"])
 def test_push_signal():
-    payload = {
-        "signals": [
-            {
-                "symbol": "NSE:SBIN-EQ",
-                "direction": "BUY",
-                "signal_time": "2025-12-05T09:36:00+05:30",
-                "candle_index": 4,
-                "open": 621.00,
-                "high": 623.00,
-                "low": 620.50,
-                "close": 622.40,
-                "entry_price": 623.00,
-                "sl": 620.50,
-                "target_price": 628.00,
-                "risk_per_share": 2.50,
-                "rr": 2.0,
-                "status": "PENDING"
-            }
-        ]
-    }
+    payload = {"signals": [
+        {"symbol": "NSE:SBIN-EQ", "direction": "BUY", "signal_time": "2025-12-05T09:36:00+05:30", "candle_index": 4, "open": 621.00, "high": 623.00, "low": 620.50, "close": 622.40, "entry_price": 623.00, "sl": 620.50, "target_price": 628.00, "risk_per_share": 2.50, "rr": 2.0, "status": "PENDING"}
+    ]}
     result = call_webapp("pushSignal", payload)
     return jsonify(result)
 
 @app.route("/test/pushTradeEntry", methods=["GET"])
-@app.route("/test/entry", methods=["GET"])
 def test_push_trade_entry():
-    payload = {
-        "symbol": "NSE:SBIN-EQ",
-        "direction": "BUY",
-        "entry_price": 623.00,
-        "sl": 620.50,
-        "target_price": 628.00,
-        "qty_total": 100,
-        "entry_time": "2025-12-05T09:37:10+05:30"
-    }
+    payload = {"symbol": "NSE:SBIN-EQ", "direction": "BUY", "entry_price": 623.00, "sl": 620.50, "target_price": 628.00, "qty_total": 100, "entry_time": "2025-12-05T09:37:10+05:30"}
     result = call_webapp("pushTradeEntry", payload)
     return jsonify(result)
 
 @app.route("/test/pushTradeExit", methods=["GET"])
-@app.route("/test/exit", methods=["GET"])
 def test_push_trade_exit():
-    payload = {
-        "symbol": "NSE:SBIN-EQ",
-        "exit_type": "PARTIAL",
-        "exit_qty": 50,
-        "exit_price": 625.50,
-        "exit_time": "2025-12-05T10:10:00+05:30",
-        "pnl": 1250.00,
-        "status": "PARTIAL"
-    }
+    payload = {"symbol": "NSE:SBIN-EQ", "exit_type": "PARTIAL", "exit_qty": 50, "exit_price": 625.50, "exit_time": "2025-12-05T10:10:00+05:30", "pnl": 1250.00, "status": "PARTIAL"}
     result = call_webapp("pushTradeExit", payload)
     return jsonify(result)
 
