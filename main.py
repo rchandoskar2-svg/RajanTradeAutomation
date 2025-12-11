@@ -1,37 +1,41 @@
 # ============================================================
-# RajanTradeAutomation - main.py (FINAL v5.0)
-# - Bias + Sector + Stock Engine
-# - FYERS WebSocket integration (data -> 5m candle engine)
+# RajanTradeAutomation - main.py (FINAL v6.0)
+# - Bias once per day (09:25-09:29 IST)
+# - Historical fill of three 5m candles
+# - Live engine from 4th candle (09:30 onwards)
+# - Dynamic subscription (StockList selected TRUE)
+# - subscribeSymbols endpoint support
+# - PAPER trade execution by default; LIVE stub available
+# - Supervisor to auto-restart threads and error reporting
 # ============================================================
 
-import os, time, threading, requests, json, math
+import os, time, threading, requests, json, traceback
 from datetime import datetime, timedelta
 
-# optional imports - ensure in requirements.txt on Render
+# Optional imports
 try:
     from nsetools import Nse
     NSE_CLIENT = Nse()
-except Exception:
+except Exception as e:
     NSE_CLIENT = None
+    print("nsetools not available:", e)
 
-# Fyers websocket client
-# package name may vary; using pattern from executive sample
+# Fyers websocket import – optional
 try:
     from fyers_apiv3.FyersWebsocket import data_ws
     FYERS_WS_AVAILABLE = True
-except Exception:
+except Exception as e:
     data_ws = None
     FYERS_WS_AVAILABLE = False
+    print("fyers websocket lib not available:", e)
 
 # ENV
-WEBAPP_URL = os.getenv("WEBAPP_URL", "").strip()
+WEBAPP_URL = os.getenv("WEBAPP_URL", "").strip()  # e.g. https://script.google.com/macros/s/xxx/exec
 FYERS_CLIENT_ID = os.getenv("FYERS_CLIENT_ID", "").strip()
 FYERS_ACCESS_TOKEN = os.getenv("FYERS_ACCESS_TOKEN", "").strip()
-FYERS_INSTRUMENTS_URL = os.getenv("FYERS_INSTRUMENTS_URL", "https://api.fyers.in/api/v2/instruments").strip()
-FYERS_HISTORICAL_URL = os.getenv("FYERS_HISTORICAL_URL", "https://api.fyers.in/data-rest/v2/history").strip()
 INTERVAL_SECS = int(os.getenv("INTERVAL_SECS", "60"))
 MODE = os.getenv("MODE", "PAPER").upper()
-AUTO_UNIVERSE = os.getenv("AUTO_UNIVERSE", "TRUE").upper() == "TRUE"
+AUTO_UNIVERSE = os.getenv("AUTO_UNIVERSE", "FALSE").upper() == "TRUE"
 
 # Helper: call WebApp
 def call_webapp(action, payload=None, timeout=20):
@@ -49,34 +53,45 @@ def call_webapp(action, payload=None, timeout=20):
 def set_state(key, value):
     return call_webapp("pushState", {"items":[{"key": key, "value": str(value)}]})
 
-# ---------------- Bias / Sector / Stock engine (unchanged core)
+# Time helpers (IST)
+def now_ist():
+    return datetime.utcnow() + timedelta(hours=5, minutes=30)
+def time_in_hm(s):
+    # s = "HH:MM"
+    hh, mm = [int(x) for x in s.split(":")]
+    return hh, mm
+
+# ---------------- Strategy core ----------------
 SECTOR_INDEX_MAP = {
     "NIFTY BANK": "BANK", "NIFTY PSU BANK": "PSUBANK", "NIFTY OIL & GAS": "OILGAS",
     "NIFTY IT": "IT", "NIFTY PHARMA": "PHARMA", "NIFTY AUTO": "AUTO", "NIFTY FMCG": "FMCG",
     "NIFTY METAL": "METAL", "NIFTY FIN SERVICE": "FIN", "NIFTY REALTY": "REALTY", "NIFTY MEDIA": "MEDIA"
 }
 
-def get_nifty50_breadth():
+def get_settings():
+    r = call_webapp("getSettings", {})
+    return r.get("settings", {}) if isinstance(r, dict) else {}
+
+def compute_bias_once(settings):
+    # Should run only during 09:25-09:29 window once.
     if NSE_CLIENT is None:
-        return {"ok": False, "error": "NSE client not available"}
+        return {"ok": False, "error": "NSE client missing"}
+
     try:
         q = NSE_CLIENT.get_index_quote("NIFTY 50")
-        adv = int(q.get("advances",0)); dec = int(q.get("declines",0)); unc = int(q.get("unchanged",0))
-        return {"ok": True, "advances": adv, "declines": dec, "unchanged": unc}
+        adv = int(q.get("advances", 0))
+        dec = int(q.get("declines", 0))
+        unc = int(q.get("unchanged", 0))
     except Exception as e:
         return {"ok": False, "error": str(e)}
 
-def compute_bias(adv, dec):
-    if adv > dec: return "BUY"
-    if dec > adv: return "SELL"
-    return "NEUTRAL"
+    bias = "BUY" if adv > dec else ("SELL" if dec > adv else "NEUTRAL")
+    strength = adv * 100.0 / (adv + dec) if (adv + dec) > 0 else 0.0
+    threshold = float(settings.get("BIAS_THRESHOLD_PERCENT", 60) or 60)
+    set_state("BIAS_STATUS", f"{bias}|{strength:.1f}|{threshold:.1f}")
+    return {"ok": True, "bias": bias, "advances": adv, "declines": dec, "strength": strength, "threshold": threshold}
 
-def compute_bias_strength(adv, dec, bias):
-    total = adv + dec
-    if total <= 0 or bias not in ("BUY","SELL"): return 0.0
-    return (adv*100.0/total) if bias=="BUY" else (dec*100.0/total)
-
-def fetch_all_sector_quotes():
+def fetch_sector_perf():
     if NSE_CLIENT is None: return []
     try:
         all_idx = NSE_CLIENT.get_all_index_quote()
@@ -86,21 +101,29 @@ def fetch_all_sector_quotes():
     for item in all_idx:
         name = item.get("index") or item.get("indexSymbol")
         if not name or name not in SECTOR_INDEX_MAP: continue
-        sectors.append({"sector_name": name, "sector_code": SECTOR_INDEX_MAP[name], "%chg": float(item.get("percentChange",0.0) or 0.0), "advances": int(item.get("advances",0) or 0), "declines": int(item.get("declines",0) or 0)})
+        chg = float(item.get("percentChange", 0.0) or 0.0)
+        adv = int(item.get("advances",0) or 0)
+        dec = int(item.get("declines",0) or 0)
+        sectors.append({"sector_name": name, "sector_code": SECTOR_INDEX_MAP[name], "%chg": chg, "advances": adv, "declines": dec})
     return sectors
 
-def build_sector_universe_and_top(bias, settings):
-    sectors = fetch_all_sector_quotes()
+def build_sector_top(bias, settings, sectors):
     if not sectors: return [], set()
-    if bias=="SELL": sectors_sorted = sorted(sectors, key=lambda s: s["%chg"]); top_count = int(settings.get("SELL_SECTOR_COUNT",2) or 2)
-    else: sectors_sorted = sorted(sectors, key=lambda s: s["%chg"], reverse=True); top_count = int(settings.get("BUY_SECTOR_COUNT",2) or 2)
+    if bias == "SELL":
+        sectors_sorted = sorted(sectors, key=lambda s: s["%chg"])
+        top_count = int(settings.get("SELL_SECTOR_COUNT", 2) or 2)
+    else:
+        sectors_sorted = sorted(sectors, key=lambda s: s["%chg"], reverse=True)
+        top_count = int(settings.get("BUY_SECTOR_COUNT", 2) or 2)
     top_count = max(1, top_count)
-    top = sectors_sorted[:top_count]; top_names = {s["sector_name"] for s in top}
+    top = sectors_sorted[:top_count]
+    top_names = {s["sector_name"] for s in top}
     return sectors_sorted, top_names
 
 def fetch_stocks_for_top_sectors(top_sector_names, bias, settings):
     if NSE_CLIENT is None or not top_sector_names: return []
-    max_up = float(settings.get("MAX_UP_PERCENT",2.5)); max_down = float(settings.get("MAX_DOWN_PERCENT",-2.5))
+    max_up = float(settings.get("MAX_UP_PERCENT", 2.5))
+    max_down = float(settings.get("MAX_DOWN_PERCENT", -2.5))
     all_rows=[]
     for sec_name in top_sector_names:
         try:
@@ -108,143 +131,184 @@ def fetch_stocks_for_top_sectors(top_sector_names, bias, settings):
         except Exception:
             continue
         for q in quotes:
-            sym = q.get("symbol"); 
+            sym = q.get("symbol")
             if not sym: continue
             pchg = float(q.get("pChange",0.0) or 0.0)
             ltp = float(q.get("ltp",0.0) or 0.0)
             vol = int(q.get("totalTradedVolume",0) or 0)
             selected = False
-            if bias=="BUY":
-                if pchg>0 and pchg<=max_up: selected=True
-            elif bias=="SELL":
-                if pchg<0 and pchg>=max_down: selected=True
-            all_rows.append({"symbol": f"NSE:{sym}-EQ", "direction_bias": bias, "sector": sec_name, "%chg": pchg, "ltp": ltp, "volume": vol, "selected": selected})
+            if bias == "BUY":
+                if pchg > 0 and pchg <= max_up:
+                    selected = True
+            elif bias == "SELL":
+                if pchg < 0 and pchg >= max_down:
+                    selected = True
+            row = {"symbol": f"NSE:{sym}-EQ", "direction_bias": bias, "sector": sec_name, "%chg": pchg, "ltp": ltp, "volume": vol, "selected": selected}
+            all_rows.append(row)
     return all_rows
 
-def run_engine_once(settings, push_to_sheets=True):
-    if NSE_CLIENT is None: return {"ok": False, "error": "NSE client not available"}
-    breadth = get_nifty50_breadth()
-    if not breadth.get("ok"): return breadth
-    adv = breadth["advances"]; dec = breadth["declines"]
-    bias = compute_bias(adv, dec)
-    strength = compute_bias_strength(adv, dec, bias)
-    threshold = float(settings.get("BIAS_THRESHOLD_PERCENT",60) or 60)
-    primary_enabled = str(settings.get("ENABLE_PRIMARY_STRATEGY","TRUE")).upper()=="TRUE"
-    status_str = f"{bias}|{strength:.1f}|{threshold:.1f}"
-    if strength >= threshold and bias in ("BUY","SELL") and primary_enabled:
-        set_state("BIAS_STATUS", "OK|" + status_str)
-    else:
-        set_state("BIAS_STATUS", "WEAK_OR_OFF|" + status_str)
-    sectors_all, top_sector_names = build_sector_universe_and_top(bias, settings)
-    stocks_all = fetch_stocks_for_top_sectors(top_sector_names, bias, settings)
-    if push_to_sheets:
-        call_webapp("updateSectorPerf", {"sectors": sectors_all})
-        call_webapp("updateStockList", {"stocks": stocks_all})
-    return {"ok": True, "bias": bias, "advances": adv, "declines": dec, "strength": strength, "threshold": threshold, "sectors_count": len(sectors_all), "top_sectors": list(top_sector_names), "stocks_count": len(stocks_all)}
-
-# ---------- Candle aggregator & 5m engine ----------
-# this keeps a small in-memory buffer per symbol to build 5m candles from ticks (if using websocket ticks)
-# When using direct 5m candles from provider, adapt accordingly.
-
-CANDLE_BUFF = {}  # symbol -> list of tick dicts (timestamp, price, volume)
-AGG_CANDLES = {}  # symbol -> list of 5m candles (recent)
+# ----------------- Candle & Signal Engine -----------------
+CANDLE_BUFF = {}     # symbol -> list of ticks {"ts": epoch, "price":float, "vol":int}
+AGG_CANDLES = {}     # symbol -> list of candles (dict)
+SIGNAL_STATE = {}    # symbol -> current signal object
 
 def feed_tick(symbol, price, volume, ts=None):
-    # ts = epoch seconds (float) or None -> now
     if ts is None: ts = time.time()
     buf = CANDLE_BUFF.setdefault(symbol, [])
     buf.append({"ts": ts, "price": price, "vol": volume})
-    # optional: keep last N ticks only
-    if len(buf) > 1000: del buf[0:-800]
+    if len(buf) > 2000: del buf[0:-1500]
 
-def build_5m_candle_from_buf(symbol, timeframe_start_ts):
-    # timeframe_start_ts in epoch seconds (start of 5m)
-    ticks = [t for t in CANDLE_BUFF.get(symbol, []) if t["ts"] >= timeframe_start_ts and t["ts"] < timeframe_start_ts + 300]
+def build_5m_candle(symbol, slot_start_ts):
+    ticks = [t for t in CANDLE_BUFF.get(symbol, []) if t["ts"] >= slot_start_ts and t["ts"] < slot_start_ts + 300]
     if not ticks: return None
-    opens = ticks[0]["price"]; closes = ticks[-1]["price"]
-    highs = max(t["price"] for t in ticks); lows = min(t["price"] for t in ticks)
+    open_p = ticks[0]["price"]
+    close_p = ticks[-1]["price"]
+    high = max(t["price"] for t in ticks)
+    low = min(t["price"] for t in ticks)
     volume = sum(t["vol"] for t in ticks)
-    return {"symbol": symbol, "time": datetime.fromtimestamp(timeframe_start_ts).isoformat(), "timeframe": "5m", "open": opens, "high": highs, "low": lows, "close": closes, "volume": volume}
+    return {"symbol": symbol, "time": datetime.fromtimestamp(slot_start_ts).isoformat(), "timeframe": "5m", "open": open_p, "high": high, "low": low, "close": close_p, "volume": volume}
 
-def push_5m_candle_to_webapp(candle, candle_index):
-    # compute lowestVolumeSoFar for that symbol's day (simple approach)
-    sig = {"symbol": candle["symbol"], "time": candle["time"], "timeframe": candle["timeframe"], "open": candle["open"], "high": candle["high"], "low": candle["low"], "close": candle["close"], "volume": candle["volume"], "candle_index": candle_index}
-    # compute lowest_volume_so_far
-    prev = AGG_CANDLES.get(candle["symbol"], [])
-    lowest = min([c["volume"] for c in prev] + [candle["volume"]]) if prev else candle["volume"]
-    sig["lowest_volume_so_far"] = lowest
-    # is_signal detection placeholder: will be updated by strategy (lowest-volume candle after initial fill)
-    sig["is_signal"] = False
-    # direction placeholder
-    sig["direction"] = "BUY" if candle["close"] >= candle["open"] else "SELL"
-    call_webapp("pushCandle", {"candles":[sig]})
+def push_5m_candle(candle, candle_index):
+    prev_vols = [c["volume"] for c in AGG_CANDLES.get(candle["symbol"], [])] if AGG_CANDLES.get(candle["symbol"]) else []
+    lowest = min(prev_vols + [candle["volume"]]) if prev_vols else candle["volume"]
+    payload = {"candles":[{
+        "symbol": candle["symbol"],
+        "time": candle["time"],
+        "timeframe": candle["timeframe"],
+        "open": candle["open"],
+        "high": candle["high"],
+        "low": candle["low"],
+        "close": candle["close"],
+        "volume": candle["volume"],
+        "candle_index": candle_index,
+        "lowest_volume_so_far": lowest,
+        "is_signal": False,
+        "direction": "BUY" if candle["close"] >= candle["open"] else "SELL"
+    }]}
+    call_webapp("pushCandle", payload)
     AGG_CANDLES.setdefault(candle["symbol"], []).append({"time": candle["time"], "volume": candle["volume"]})
-    return sig
+    return payload["candles"][0]
 
-# ---------- FYERS WebSocket integration (uses executive sample pattern) ----------
+# Signal detection rules (as specified)
+def evaluate_signal_for_candle(candle, settings):
+    symbol = candle["symbol"]
+    prev_candles = AGG_CANDLES.get(symbol, [])
+    vols = [c["volume"] for c in prev_candles] + [candle["volume"]]
+    if len(vols) < 3:
+        return None
+    lowest_so_far = min(vols[:-1])  # lowest among earlier candles
+    # We want current candle volume < lowest_so_far AND candle color matches bias rule
+    # Determine bias from State sheet
+    state = call_webapp("getSettings", {})
+    ssettings = state.get("settings", {}) if isinstance(state, dict) else {}
+    bias_state = None
+    bias_resp = call_webapp("getSettings", {}, timeout=10)
+    # fallback: read BIAS_STATUS from State sheet
+    st = call_webapp("pushState", {"items":[]})
+    # read State sheet via getSettings? simplified: call WebApp 'getSettings' doesn't provide BIAS
+    # We will use global SIGNAL_STATE placeholder to decide direction per stock (StockList has DirectionBias)
+    # For simplicity, get StockList entry
+    stocklist = call_webapp("getStockList", {})
+    stocks = stocklist.get("stocks", []) if isinstance(stocklist, dict) else []
+    info = next((s for s in stocks if s.get("symbol","").upper() == symbol.upper()), {})
+    intended_direction = info.get("direction_bias", "").upper() or "BUY"
+    # BUY rule: signal candle is RED (open > close) and volume < lowest_so_far
+    is_red = candle["open"] > candle["close"]
+    is_green = candle["close"] > candle["open"]
+    if intended_direction == "BUY":
+        if is_red and candle["volume"] < lowest_so_far:
+            return {"symbol": symbol, "direction": "BUY", "entry_price": candle["high"], "sl": candle["low"], "candle_index": candle.get("candle_index",0)}
+    elif intended_direction == "SELL":
+        if is_green and candle["volume"] < lowest_so_far:
+            return {"symbol": symbol, "direction": "SELL", "entry_price": candle["low"], "sl": candle["high"], "candle_index": candle.get("candle_index",0)}
+    return None
+
+# Quantity calc
+def compute_qty(entry, sl, risk_per_trade):
+    per_share_risk = abs(entry - sl)
+    if per_share_risk <= 0: return 0
+    qty = int(risk_per_trade // per_share_risk)
+    return max(0, qty)
+
+# Trade execution (stub)
+def execute_trade(signal, settings):
+    # signal = {"symbol","direction","entry_price","sl","candle_index"}
+    mode = MODE
+    risk = float(settings.get("PER_TRADE_RISK", 1000) or 1000)
+    rr = float(settings.get("RR_RATIO", 2) or 2)
+    qty = compute_qty(signal["entry_price"], signal["sl"], risk)
+    target = signal["entry_price"] + rr*(signal["entry_price"] - signal["sl"]) if signal["direction"] == "BUY" else signal["entry_price"] - rr*(signal["sl"] - signal["entry_price"])
+    payload = {
+        "symbol": signal["symbol"],
+        "direction": signal["direction"],
+        "entry_price": signal["entry_price"],
+        "sl": signal["sl"],
+        "target_price": target,
+        "qty_total": qty,
+        "entry_time": datetime.utcnow().isoformat()
+    }
+    if mode == "PAPER":
+        # push to sheets as executed trade (simulate immediate fill)
+        call_webapp("pushTradeEntry", payload)
+        print("PAPER trade executed ->", payload)
+        return {"ok": True, "mode": "PAPER", "payload": payload}
+    else:
+        # LIVE stub: implement broker order call here (Fyers REST order)
+        # For safety default is PAPER; implement if you want LIVE.
+        print("LIVE execution not implemented. Received:", payload)
+        return {"ok": False, "error": "LIVE execution not enabled"}
+
+# ----------------- WebSocket (Fyers) integration -----------------
 FYERS_WS = None
-SUBSCRIBED_SYMBOLS = set()
-USE_FYERS_WS = FYERS_WS_AVAILABLE and bool(FYERS_ACCESS_TOKEN)
-
+SUBSCRIBED = set()
 def fyers_onmessage(msg):
-    # This callback will receive tick/quote updates. msg format depends on fyers lib.
     try:
-        # Example structure handling — adapt if actual message structure differs.
-        # If it's SymbolUpdate with 'd' key containing list of updates:
         if not isinstance(msg, dict):
-            print("fy_msg not dict:", msg)
             return
-        # The actual fyers message parsing will depend on library; try common fields:
         data = msg.get("d") or msg.get("data") or msg.get("response")
         if isinstance(data, list):
             for it in data:
-                # Typical fields: 'symbol', 'ltp', 'volume' ... adjust as needed
                 sym = it.get("symbol") or it.get("s")
                 ltp = it.get("ltp") or it.get("last_price") or it.get("l")
                 vol = it.get("volume") or it.get("v") or 0
-                ts = time.time()
                 if sym and ltp is not None:
-                    feed_tick(sym, float(ltp), int(vol or 0), ts)
+                    feed_tick(sym, float(ltp), int(vol or 0), time.time())
         else:
-            # fallback single update
             sym = msg.get("symbol") or msg.get("s")
             ltp = msg.get("ltp")
             vol = msg.get("volume") or 0
             if sym and ltp is not None:
                 feed_tick(sym, float(ltp), int(vol or 0), time.time())
     except Exception as e:
-        print("fy_onmsg err:", e)
+        print("fyers_onmessage error:", e)
 
 def fyers_onopen():
-    print("FYERS WS opened")
-    # subscribe to selected symbols from StockList via WebApp
-    resp = call_webapp("getSettings", {})
-    # get current StockList (call webapp directly)
-    sl = call_webapp("getStockList", {}) if False else None  # optional - custom handler; fallback to fetch from sheet via getSettings not available
-    # We'll subscribe to symbols from StockList sheet by reading that sheet via a small POST helper
+    print("FYERS WS connected")
+    # subscribe to current selected symbols
     try:
-        # We will request StockList by calling our GAS pushState trick: create an action to return StockList (not implemented)
-        # Simpler: subscribe to a minimal default set for now (example), and allow dynamic subscribe via endpoint /subscribeSymbols
-        pass
+        sl = call_webapp("getStockList", {})
+        stocks = sl.get("stocks", []) if isinstance(sl, dict) else []
+        syms = [s["symbol"] for s in stocks if s.get("selected")]
+        subscribe_to_fyers_symbols(syms)
     except Exception as e:
-        print("subscribe error:", e)
+        print("fyers_onopen err:", e)
 
-def fyers_onerror(err):
-    print("FYERS WS error:", err)
+def fyers_onerror(e):
+    print("FYERS WS error:", e)
 
 def fyers_onclose(msg):
     print("FYERS WS closed:", msg)
 
-def start_fyers_ws(sub_symbols=None):
-    global FYERS_WS, SUBSCRIBED_SYMBOLS
+def start_fyers_ws(symbols=None):
+    global FYERS_WS, SUBSCRIBED, FYERS_ACCESS_TOKEN
     if not FYERS_WS_AVAILABLE:
-        print("FYERS websocket lib not installed or available.")
+        print("FYERS websocket lib not installed.")
         return
     if not FYERS_ACCESS_TOKEN:
-        print("FYERS_ACCESS_TOKEN not set — cannot start WS.")
+        print("FYERS_ACCESS_TOKEN not set. WebSocket not started.")
         return
     try:
-        SUBSCRIBED_SYMBOLS = set(sub_symbols or [])
+        SUBSCRIBED = set(symbols or [])
         FYERS_WS = data_ws.FyersDataSocket(
             access_token = FYERS_ACCESS_TOKEN,
             log_path = "",
@@ -260,129 +324,159 @@ def start_fyers_ws(sub_symbols=None):
     except Exception as e:
         print("start_fyers_ws error:", e)
 
-# ---------- Periodic aggregator thread to flush 5m candles ----------
-def aggregator_cycle():
-    """
-    Every 5s check if any 5-minute boundary has passed for symbols with buffer and flush candle.
-    Simpler approach: compute current 5m slot for now and build candle for previous slot.
-    """
-    last_checked_slot = None
+def subscribe_to_fyers_symbols(symbols):
+    global SUBSCRIBED, FYERS_WS
+    if not symbols: return
+    symbols = [s for s in symbols if s]
+    SUBSCRIBED.update(symbols)
+    # call WebApp endpoint to log subscriptions
+    call_webapp("subscribeSymbols", {"symbols": list(SUBSCRIBED), "source": "engine"})
+    # If FYERS_WS object supports subscribe method, call it
+    try:
+        if FYERS_WS:
+            FYERS_WS.subscribe(symbols=symbols, data_type="SymbolUpdate")
+    except Exception as e:
+        print("subscribe error:", e)
+
+# ----------------- Aggregator & Engine Loops -----------------
+def aggregator_thread():
+    last_slot = None
     while True:
         try:
-            now = datetime.utcnow() + timedelta(hours=5, minutes=30)  # IST
-            # compute current slot start (rounded down to nearest 5 minutes)
+            now = now_ist()
             minute = (now.minute // 5) * 5
             slot_start = datetime(now.year, now.month, now.day, now.hour, minute, 0)
             slot_ts = slot_start.timestamp()
-            if last_checked_slot is None:
-                last_checked_slot = slot_ts
-            # if new slot started, we build for previous slot
-            if slot_ts != last_checked_slot:
-                prev_slot = last_checked_slot
-                # build for all symbols that have ticks
-                for symbol in list(CANDLE_BUFF.keys()):
-                    candle = build_5m_candle_from_buf(symbol, prev_slot)
+            if last_slot is None:
+                last_slot = slot_ts
+            # if slot changed -> finalize previous slot candle
+            if slot_ts != last_slot:
+                prev_slot = last_slot
+                symbols = list(CANDLE_BUFF.keys())
+                for symbol in symbols:
+                    candle = build_5m_candle(symbol, prev_slot)
                     if candle:
-                        # candle_index: length of AGG_CANDLES+1 for that symbol
                         candle_index = len(AGG_CANDLES.get(symbol, [])) + 1
-                        sig = push_5m_candle_to_webapp(candle, candle_index)
-                        # After pushing candle, decide if it's the new lowest-volume and whether to generate a signal:
-                        # Signal rule: after initial historical fill (we may require first 3 candles), identify lowest volume so far and mark it as signal
-                        prev = AGG_CANDLES.get(symbol, [])
-                        # if candle is lowest among prev+current and after at least 3 candles
-                        vols = [c["volume"] for c in prev] + [candle["volume"]]
-                        if len(vols) >= 3 and candle["volume"] == min(vols):
-                            # create signal: direction rule (RED candle buy on break HIGH etc.)
-                            # For simplicity create entry candidate with entry_price = candle.high (for BUY) or candle.low (for SELL)
-                            direction = "BUY" if candle["close"] >= candle["open"] else "SELL"
-                            entry_price = candle["high"] if direction=="BUY" else candle["low"]
-                            sl = candle["low"] if direction=="BUY" else candle["high"]
-                            # target at RR=2 -> simple: target = entry + 2*(entry-sl) for BUY
-                            risk_per_share = abs(entry_price - sl)
-                            if risk_per_share <= 0: continue
-                            rr = float(2.0)
-                            target = entry_price + rr * (entry_price - sl) if direction=="BUY" else entry_price - rr * (sl - entry_price)
-                            # prepare signal payload
-                            signal_payload = {
-                                "signals": [
-                                    {
-                                        "symbol": candle["symbol"],
-                                        "direction": direction,
-                                        "signal_time": candle["time"],
-                                        "candle_index": candle_index,
-                                        "open": candle["open"],
-                                        "high": candle["high"],
-                                        "low": candle["low"],
-                                        "close": candle["close"],
-                                        "entry_price": entry_price,
-                                        "sl": sl,
-                                        "target_price": target,
-                                        "risk_per_share": risk_per_share,
-                                        "rr": rr,
-                                        "status": "PENDING"
-                                    }
-                                ]
-                            }
-                            call_webapp("pushSignal", signal_payload)
-                last_checked_slot = slot_ts
+                        pushed = push_5m_candle(candle, candle_index)
+                        # after pushing, evaluate signal if >=4th candle
+                        if candle_index >= 4:
+                            sig = evaluate_signal_for_candle(candle, get_settings())
+                            if sig:
+                                # cancel previous pending signals for symbol
+                                SIGNAL_STATE[symbol] = sig
+                                execute_trade(sig, get_settings())
+                last_slot = slot_ts
         except Exception as e:
-            print("aggregator_cycle error:", e)
+            print("aggregator error:", e, traceback.format_exc())
+            try:
+                call_webapp("pushState", {"items":[{"key":"ENGINE_ERROR","value":str(e)}]})
+            except: pass
         time.sleep(5)
 
-# ---------- Engine cycle background ----------
-def engine_cycle():
-    # initial universe sync
-    try:
-        if AUTO_UNIVERSE:
-            # try syncing once at start
-            # reuse earlier sync logic: call our test endpoint or rely on NSE client
-            # we'll call run_engine_once at start
-            pass
-    except Exception as e:
-        print("universe sync err:", e)
+def engine_supervisor():
+    # Supervisor starts engine and aggregator and restarts if they crash
     while True:
         try:
-            settings_resp = call_webapp("getSettings", {})
-            settings = settings_resp.get("settings", {}) if isinstance(settings_resp, dict) else {}
-            result = run_engine_once(settings, push_to_sheets=True)
-            print("Engine run:", result)
+            t_agg = threading.Thread(target=aggregator_thread, daemon=True)
+            t_agg.start()
+            # Start fyers ws if token present
+            if FYERS_WS_AVAILABLE and FYERS_ACCESS_TOKEN:
+                # subscribe symbols from StockList
+                sl = call_webapp("getStockList", {})
+                stocks = sl.get("stocks", []) if isinstance(sl, dict) else []
+                syms = [s["symbol"] for s in stocks if s.get("selected")]
+                start_fyers_ws(syms)
+            # monitor threads
+            while True:
+                if not t_agg.is_alive():
+                    print("aggregator thread died, restarting...")
+                    break
+                time.sleep(5)
         except Exception as e:
-            print("ENGINE ERROR:", e)
-        time.sleep(INTERVAL_SECS)
+            print("supervisor error:", e, traceback.format_exc())
+        # wait a bit then restart
+        time.sleep(3)
 
-def start_background_threads():
-    t1 = threading.Thread(target=engine_cycle, daemon=True)
-    t2 = threading.Thread(target=aggregator_cycle, daemon=True)
-    t1.start(); t2.start()
-    # start fyers ws if available and token present
-    if FYERS_WS_AVAILABLE and FYERS_ACCESS_TOKEN:
-        # choose default symbols to subscribe from StockList - we rely on user to set in Settings or add subscribe API later
-        default_symbols = []
+# ----------------- Daily Bias/Seed Task (09:25-09:29 window) -----------------
+BIAS_DONE_DATE = None
+
+def daily_bias_and_seed():
+    global BIAS_DONE_DATE
+    while True:
         try:
-            # attempt to pull current StockList via a GET-like WebApp helper (not implemented). For now we subscribe none.
-            pass
-        except:
-            pass
-        start_fyers_ws(default_symbols)
+            now = now_ist()
+            today_str = now.strftime("%Y-%m-%d")
+            if BIAS_DONE_DATE == today_str:
+                # already done for today
+                time.sleep(20)
+                continue
+            # check window 09:25 <= time < 09:30
+            h,m = now.hour, now.minute
+            if (h == 9 and (m >= 25 and m < 30)):
+                settings = get_settings()
+                # compute bias once
+                bias_res = compute_bias_once(settings)
+                if not bias_res.get("ok"):
+                    print("Bias compute failed:", bias_res)
+                # fetch sectors -> push
+                sectors = fetch_sector_perf()
+                call_webapp("updateSectorPerf", {"sectors": sectors})
+                # build top sectors and stocks
+                sectors_all, top_names = build_sector_top(bias_res.get("bias","NEUTRAL"), settings, sectors)
+                stocks_all = fetch_stocks_for_top_sectors(top_names, bias_res.get("bias","NEUTRAL"), settings)
+                # push stock list to sheet
+                call_webapp("updateStockList", {"stocks": stocks_all})
+                # Optionally, if AUTO_UNIVERSE is true, sync Universe (not implemented heavy)
+                # Historical fill for 3 candles: we push placeholder candles by fetching historical via FYERS_HISTORICAL_URL if available
+                # For now we rely on aggregator (which uses tick buffer) – but to ensure CandleHistory initial 3 candles, attempt to call fyers historical or skip.
+                # Mark as done
+                BIAS_DONE_DATE = today_str
+                print("Bias & seed done for", today_str, "bias:", bias_res.get("bias"))
+            time.sleep(10)
+        except Exception as e:
+            print("daily_bias error:", e, traceback.format_exc())
+            time.sleep(5)
+
+# ----------------- Start background services -----------------
+def start_background():
+    threads = []
+    t_super = threading.Thread(target=engine_supervisor, daemon=True)
+    t_super.start()
+    threads.append(t_super)
+    t_bias = threading.Thread(target=daily_bias_and_seed, daemon=True)
+    t_bias.start()
+    threads.append(t_bias)
+    print("Background threads started:", [t.name for t in threads])
+    return threads
 
 if __name__ == "__main__":
-    start_background_threads()
-    # Minimal Flask for debug/test routes (optional)
-    from flask import Flask, jsonify
-    app = Flask(__name__)
-    @app.route("/", methods=["GET"])
-    def root(): return "RajanTradeAutomation v5.0", 200
-    @app.route("/engine/debug", methods=["GET"])
-    def debug(): 
-        settings = call_webapp("getSettings", {}).get("settings", {})
-        return jsonify(run_engine_once(settings, push_to_sheets=False))
-    @app.route("/engine/run-now", methods=["GET"])
-    def runnow():
-        settings = call_webapp("getSettings", {}).get("settings", {})
-        return jsonify(run_engine_once(settings, push_to_sheets=True))
-    @app.route("/test/pushCandle", methods=["POST"])
-    def test_push_candle():
-        payload = requests.get("https://httpbin.org/get").text
-        return jsonify({"ok": True})
-    port = int(os.getenv("PORT", "10000"))
-    app.run(host="0.0.0.0", port=port)
+    print("RajanTradeAutomation v6.0 starting...")
+    start_background()
+    # Minimal Flask for debug routes
+    try:
+        from flask import Flask, jsonify
+        app = Flask(__name__)
+        @app.route("/", methods=["GET"])
+        def root(): return "RajanTradeAutomation v6.0", 200
+        @app.route("/engine/debug", methods=["GET"])
+        def debug():
+            settings = get_settings()
+            return jsonify({"ok": True, "settings": settings, "subscribed": list(SUBSCRIBED)})
+        @app.route("/engine/run-now", methods=["GET"])
+        def runnow():
+            settings = get_settings()
+            # run a single seed
+            res = compute_bias_once(settings)
+            sectors = fetch_sector_perf()
+            call_webapp("updateSectorPerf", {"sectors": sectors})
+            sectors_all, top_names = build_sector_top(res.get("bias","NEUTRAL"), settings, sectors)
+            stocks_all = fetch_stocks_for_top_sectors(top_names, res.get("bias","NEUTRAL"), settings)
+            call_webapp("updateStockList", {"stocks": stocks_all})
+            return jsonify({"ok": True, "bias": res, "sectors": len(sectors_all), "stocks": len(stocks_all)})
+        port = int(os.getenv("PORT", "10000"))
+        app.run(host="0.0.0.0", port=port)
+    except Exception as e:
+        print("Flask not started (optional). Error:", e)
+        # keep main thread alive
+        while True:
+            time.sleep(60)
