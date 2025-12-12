@@ -1,6 +1,6 @@
 # ============================================================
 # RajanTradeAutomation – Main Backend (Render / Flask)
-# Version: 6.2 (Bias Window + WS Engine + Crash Safe + Manual Routes)
+# Version: 6.3 (Fixed Selected=TRUE Parsing + Manual Routes)
 # ============================================================
 
 from flask import Flask, request, jsonify, Response
@@ -12,7 +12,7 @@ import traceback
 import json
 
 # ------------------------------------------------------------
-# Fyers WebSocket Library Detection (Safe Mode)
+# Fyers WebSocket Library Detection
 # ------------------------------------------------------------
 try:
     from fyers_apiv3.FyersWebsocket import data_ws
@@ -23,7 +23,7 @@ except Exception as e:
     print("⚠️ Fyers WebSocket library NOT installed:", e)
 
 # ------------------------------------------------------------
-# Load Environment Variables
+# Environment Variables
 # ------------------------------------------------------------
 WEBAPP_URL = os.getenv("WEBAPP_URL", "").strip()
 
@@ -39,11 +39,11 @@ AUTO_UNIVERSE = os.getenv("AUTO_UNIVERSE", "FALSE").upper() == "TRUE"
 
 # Strategy timings
 BIAS_START = "09:25"
-BIAS_END = "09:29"
+BIAS_END   = "09:29"
 HIST_FILL_START = "09:15"
 ENGINE_START = "09:10"
 
-# State
+# State Flags
 BIAS_DONE = False
 HIST_DONE = False
 LIVE_STARTED = False
@@ -51,16 +51,18 @@ LIVE_STARTED = False
 SUBSCRIBED = set()
 FYERS_WS = None
 
+# Flask App
 app = Flask(__name__)
 
 # ------------------------------------------------------------
-# Helpers
+# Common Helpers
 # ------------------------------------------------------------
 def call_webapp(action, payload=None, timeout=25):
     if payload is None:
         payload = {}
     if not WEBAPP_URL:
         return {"ok": False, "error": "WEBAPP_URL missing"}
+
     try:
         res = requests.post(WEBAPP_URL, json={"action": action, "payload": payload}, timeout=timeout)
         return res.json()
@@ -75,6 +77,10 @@ def set_state(key, value):
 
 def now_time():
     return time.strftime("%H:%M")
+
+def is_selected(value):
+    """Fix: TRUE coming from Google Sheet as string."""
+    return str(value).strip().upper() == "TRUE"
 
 def within(t, A, B):
     return A <= t <= B
@@ -101,21 +107,25 @@ def fetch_historical(symbol):
         })
     return candles
 
+
 def run_historical_fill(stocks):
     global HIST_DONE
     if HIST_DONE:
         return
+
     print("📘 Running historical fill...")
+
     for row in stocks:
-        if row.get("selected"):
+        if is_selected(row.get("selected")):
             symbol = row["symbol"]
             candles = fetch_historical(symbol)
             call_webapp("pushCandle", {"candles": candles})
+
     HIST_DONE = True
     print("📘 Historical fill completed.")
 
 # ------------------------------------------------------------
-# Bias + Sector + Stocks
+# Bias + SectorPerf + StockList
 # ------------------------------------------------------------
 def compute_bias():
     adv = 35
@@ -124,30 +134,32 @@ def compute_bias():
     strength = (adv * 100) / (adv + dec)
     return bias, strength
 
+
 def run_bias_sector_stock():
     global BIAS_DONE
+
     bias, strength = compute_bias()
     print("📗 Bias:", bias, "Strength:", strength)
 
+    # Example Sectors
     sectors = [
         {"sector_name": "NIFTY AUTO", "sector_code": "AUTO", "%chg": 1.11, "advances": 15, "declines": 5},
         {"sector_name": "NIFTY METAL", "sector_code": "METAL", "%chg": 1.05, "advances": 10, "declines": 5}
     ]
-
     call_webapp("updateSectorPerf", {"sectors": sectors})
 
+    # Example stocks
     stocks = [
         {"symbol": "NSE:SBIN-EQ", "direction_bias": bias, "sector": "NIFTY AUTO",
          "%chg": 1.22, "ltp": 622.4, "volume": 1250000, "selected": True}
     ]
-
     call_webapp("updateStockList", {"stocks": stocks})
 
     BIAS_DONE = True
     return stocks
 
 # ------------------------------------------------------------
-# WebSocket
+# WebSocket Handling
 # ------------------------------------------------------------
 def on_message(msg):
     print("WS Tick:", msg)
@@ -191,7 +203,7 @@ def start_ws():
         print("❌ WS startup error:", e)
 
 # ------------------------------------------------------------
-# Live Engine
+# LIVE ENGINE
 # ------------------------------------------------------------
 def start_live_engine(stocks):
     global LIVE_STARTED
@@ -200,14 +212,14 @@ def start_live_engine(stocks):
     LIVE_STARTED = True
 
     for row in stocks:
-        if row.get("selected"):
+        if is_selected(row.get("selected")):
             SUBSCRIBED.add(row["symbol"])
 
     start_ws()
     print("🚀 LIVE engine started with symbols:", SUBSCRIBED)
 
 # ------------------------------------------------------------
-# Automatic Token Exchange
+# Token Exchange (Automatic)
 # ------------------------------------------------------------
 def try_exchange_token():
     if not FYERS_AUTH_CODE or not FYERS_CLIENT_SECRET:
@@ -227,16 +239,17 @@ def try_exchange_token():
 
         if "access_token" in j:
             set_state("FYERS_EXCHANGED_TOKEN", j)
+
         return j
     except Exception as e:
         print("❌ Token exchange error:", e)
         return None
 
 # ------------------------------------------------------------
-# Engine Loop
+# ENGINE LOOP
 # ------------------------------------------------------------
 def engine_loop():
-    print("🔥 Engine booting… v6.2")
+    print("🔥 Engine booting… v6.3")
     time.sleep(3)
 
     while True:
@@ -248,7 +261,7 @@ def engine_loop():
                 set_state("ENGINE_STARTUP", "OK")
 
             if within(t, BIAS_START, BIAS_END):
-                stocks = run_bias_sector_stock()
+                run_bias_sector_stock()
 
             if within(t, HIST_FILL_START, BIAS_START):
                 sheet = call_webapp("getStockList", {})
@@ -266,10 +279,9 @@ def engine_loop():
 
         time.sleep(5)
 
-def start_background():
-    threading.Thread(target=engine_loop, daemon=True).start()
 
-start_background()
+thread = threading.Thread(target=engine_loop, daemon=True)
+thread.start()
 
 # ------------------------------------------------------------
 # FYERS Redirect Route
@@ -285,7 +297,7 @@ def fyers_redirect():
     return Response(f"<h2>Auth code received ✓</h2><p>{auth_code}</p>", mimetype="text/html")
 
 # ------------------------------------------------------------
-# Manual CONTROLS (Requested by Rajan)
+# MANUAL ENGINE ROUTES
 # ------------------------------------------------------------
 @app.route("/engine/run-bias-now")
 def run_bias_now():
@@ -294,6 +306,7 @@ def run_bias_now():
         return jsonify({"ok": True, "message": "Bias + Sector + StockList run manually", "stocks": stocks})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
+
 
 @app.route("/engine/run-historical-now")
 def run_historical_now():
@@ -304,6 +317,7 @@ def run_historical_now():
         return jsonify({"ok": True, "message": "Historical candles filled manually"})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
+
 
 @app.route("/engine/start-live-now")
 def run_live_now():
@@ -316,11 +330,11 @@ def run_live_now():
         return jsonify({"ok": False, "error": str(e)}), 500
 
 # ------------------------------------------------------------
-# Basic Routes
+# BASIC ROUTES
 # ------------------------------------------------------------
 @app.route("/")
 def root():
-    return "RajanTradeAutomation backend v6.2 — LIVE", 200
+    return "RajanTradeAutomation backend v6.3 — LIVE", 200
 
 @app.route("/engine/ws-check")
 def wscheck():
