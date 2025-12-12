@@ -1,10 +1,10 @@
 # ============================================================
 # RajanTradeAutomation – Main Backend (Render / Flask)
 # Version: 6.1 (Stable – Bias Window + WS Engine + Crash Safe)
-# Modified: added /fyers-redirect token flow & getter
+# Added: /fyers-redirect catcher + optional token-exchange
 # ============================================================
 
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, Response
 import requests
 import os
 import time
@@ -28,9 +28,12 @@ except Exception as e:
 # ------------------------------------------------------------
 WEBAPP_URL = os.getenv("WEBAPP_URL", "").strip()
 
-FYERS_CLIENT_ID = os.getenv("FYERS_CLIENT_ID", "").strip()    # e.g. N83MS34FQO-100
-FYERS_SECRET = os.getenv("FYERS_SECRET", "").strip()          # set this in Render env
+FYERS_CLIENT_ID = os.getenv("FYERS_CLIENT_ID", "").strip()
+FYERS_CLIENT_SECRET = os.getenv("FYERS_CLIENT_SECRET", "").strip()  # optional for auto-exchange
 FYERS_ACCESS_TOKEN = os.getenv("FYERS_ACCESS_TOKEN", "").strip()
+
+# Optional: token endpoint (if you want to auto-exchange)
+FYERS_TOKEN_URL = os.getenv("FYERS_TOKEN_URL", "https://api-t1.fyers.in/api/v2/token").strip()
 
 INTERVAL_SECS = int(os.getenv("INTERVAL_SECS", "60"))
 AUTO_UNIVERSE = os.getenv("AUTO_UNIVERSE", "FALSE").upper() == "TRUE"
@@ -70,8 +73,8 @@ def call_webapp(action, payload=None, timeout=25):
 def set_state(key, value):
     try:
         call_webapp("setState", {"key": key, "value": str(value)})
-    except Exception as e:
-        print("set_state error:", e)
+    except:
+        pass
 
 def now_time():
     return time.strftime("%H:%M")
@@ -80,7 +83,7 @@ def within(t, A, B):
     return A <= t <= B
 
 # ------------------------------------------------------------
-# 1) Historical Candle Fetch (3 candles)  (demo / stub)
+# 1) Historical Candle Fetch (3 candles)
 # ------------------------------------------------------------
 def fetch_historical(symbol):
     """Fetch 3 historical candles (9:15-20, 20-25, 25-30)"""
@@ -176,7 +179,7 @@ def on_open():
 
 def start_ws():
     """Start WebSocket only if library is present"""
-    global FYERS_WS, FYERS_ACCESS_TOKEN
+    global FYERS_WS
     if not FYERS_WS_AVAILABLE:
         print("⚠️ WebSocket skipped (library missing)")
         return
@@ -265,87 +268,92 @@ def start_background():
 start_background()
 
 # ------------------------------------------------------------
-# FYERS token exchange helpers/routes
+# FYERS OAuth redirect catcher + optional token exchange
 # ------------------------------------------------------------
-def exchange_code_for_token(code):
+def try_exchange_token(auth_code, redirect_uri):
     """
-    Exchange authorization code for access token with Fyers.
-    Requires FYERS_CLIENT_ID and FYERS_SECRET to be set in env.
+    Attempt to exchange auth_code for access token if client secret present.
+    This is optional — if FYERS_CLIENT_SECRET env var is missing this will skip.
     """
-    global FYERS_CLIENT_ID, FYERS_SECRET
-    if not FYERS_CLIENT_ID or not FYERS_SECRET:
-        return {"ok": False, "error": "Missing FYERS_CLIENT_ID or FYERS_SECRET in environment."}
+    if not FYERS_CLIENT_ID or not FYERS_CLIENT_SECRET:
+        print("⚠️ Skipping token exchange (client_id/secret missing).")
+        return {"ok": False, "reason": "missing_client_secret_or_id"}
 
-    token_url = "https://api.fyers.in/api/v2/token"
     payload = {
         "grant_type": "authorization_code",
-        "code": code,
+        "code": auth_code,
         "client_id": FYERS_CLIENT_ID,
-        "secret_key": FYERS_SECRET,
-        # include redirect_uri if Fyers requires exact match
-        "redirect_uri": WEBAPP_URL or ""
+        "redirect_uri": redirect_uri
     }
 
     try:
-        resp = requests.post(token_url, data=payload, timeout=20)
-        try:
-            data = resp.json()
-        except Exception:
-            data = {"raw": resp.text}
-        if resp.status_code != 200:
-            return {"ok": False, "error": "token endpoint error", "status": resp.status_code, "response": data}
-        # Fyers typically returns an access_token field
-        access_token = data.get("access_token") or data.get("access_token", None)
-        return {"ok": True, "data": data, "access_token": access_token}
+        resp = requests.post(FYERS_TOKEN_URL, data=payload, timeout=15)
+        j = resp.json()
+        print("🔁 Token exchange response:", j)
+        # If token present, optionally set env (not persisted in process env for Render)
+        # Instead push to WebApp state so GAS can store securely if needed
+        if "access_token" in j:
+            set_state("FYERS_EXCHANGED_TOKEN", j)  # store full token object in sheet/state
+        return {"ok": True, "resp": j}
     except Exception as e:
+        print("❌ Token exchange error:", e)
         return {"ok": False, "error": str(e)}
 
-@app.route("/fyers-redirect", methods=["GET"])
+@app.route("/fyers-redirect")
 def fyers_redirect():
     """
-    Route to receive the authorization code from Fyers.
-    Fyers will redirect user here with ?code=...&state=...
-    This endpoint will exchange the code for an access token and save it via set_state
+    Catch the OAuth redirect from Fyers.
+    Accepts query params: auth_code or code, state
+    - logs & pushes to WebApp state
+    - attempts optional token exchange if client secret present
+    - returns a simple HTML page so user sees success (no 404)
     """
-    global FYERS_ACCESS_TOKEN
-    code = request.args.get("code")
-    state = request.args.get("state")
-    if not code:
-        return "Missing code parameter", 400
-
-    print("🔔 /fyers-redirect received code:", code, " state:", state)
-
-    # Exchange code for token
-    res = exchange_code_for_token(code)
-    if not res.get("ok"):
-        print("❌ token exchange failed:", res)
-        return jsonify({"ok": False, "error": res}), 500
-
-    token = res.get("access_token")
-    if not token:
-        # If token absent, return full data for debugging
-        print("⚠️ token not found in response:", res.get("data"))
-        return jsonify({"ok": False, "message": "No access_token in response", "response": res.get("data")}), 500
-
-    # Save token in memory (process) and push to WebApp (sheet/state)
-    FYERS_ACCESS_TOKEN = token
     try:
-        set_state("FYERS_ACCESS_TOKEN", token)
-        print("✅ FYERS_ACCESS_TOKEN saved to WebApp state.")
+        # Fyers sometimes uses 'auth_code' or 'code'
+        auth_code = request.args.get("auth_code") or request.args.get("code")
+        state = request.args.get("state")
+
+        if not auth_code:
+            # Show friendly help page
+            html = f"""
+            <html>
+              <body>
+                <h2>Fyers redirect received — no auth_code found</h2>
+                <p>Query params received: {json.dumps(request.args.to_dict())}</p>
+                <p>Make sure your OAuth URL's redirect_uri exactly matches this endpoint:
+                   <code>{request.url}</code></p>
+              </body>
+            </html>
+            """
+            return Response(html, status=400, mimetype="text/html")
+
+        # Save the auth_code into WebApp state (so GAS/sheets can pick it up)
+        set_state("FYERS_AUTH_CODE", auth_code)
+        set_state("FYERS_AUTH_STATE", state or "")
+
+        # Try exchanging immediately if possible (optional)
+        redirect_uri = os.getenv("FYERS_REDIRECT_URI", "") or request.base_url
+        exchange_result = try_exchange_token(auth_code, redirect_uri)
+
+        # Friendly HTML response for user's browser
+        html = f"""
+        <html>
+          <body>
+            <h2>Auth code received ✅</h2>
+            <p><b>auth_code:</b> {auth_code}</p>
+            <p><b>state:</b> {state}</p>
+            <p>Exchange attempted: {json.dumps(exchange_result)}</p>
+            <p>You can now copy this auth_code and paste into Render environment variable <code>FYERS_AUTH_CODE</code>
+               or let the system exchange it automatically (if FYERS_CLIENT_SECRET is set).</p>
+          </body>
+        </html>
+        """
+        return Response(html, status=200, mimetype="text/html")
+
     except Exception as e:
-        print("❌ Error saving token to webapp/state:", e)
-
-    # Optionally return a friendly page
-    return "Access token received and saved. You can close this window.", 200
-
-@app.route("/get-access-token", methods=["GET"])
-def get_access_token_route():
-    """
-    Debug route to fetch current token from process env/state
-    """
-    token = FYERS_ACCESS_TOKEN or os.getenv("FYERS_ACCESS_TOKEN", "")
-    present = bool(token)
-    return jsonify({"access_token_present": present, "access_token_preview": (token[:6] + "..." + token[-6:]) if present else ""})
+        print("❌ /fyers-redirect handler error:", e)
+        traceback.print_exc()
+        return jsonify({"ok": False, "error": str(e)}), 500
 
 # ------------------------------------------------------------
 # API ROUTES
