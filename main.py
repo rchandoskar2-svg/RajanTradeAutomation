@@ -1,6 +1,7 @@
 # ============================================================
 # RajanTradeAutomation – Main Backend (Render / Flask)
 # Version: 6.1 (Stable – Bias Window + WS Engine + Crash Safe)
+# Modified: added /fyers-redirect token flow & getter
 # ============================================================
 
 from flask import Flask, request, jsonify
@@ -9,6 +10,7 @@ import os
 import time
 import threading
 import traceback
+import json
 
 # ------------------------------------------------------------
 # Fyers WebSocket Library Detection (Safe Mode)
@@ -26,7 +28,8 @@ except Exception as e:
 # ------------------------------------------------------------
 WEBAPP_URL = os.getenv("WEBAPP_URL", "").strip()
 
-FYERS_CLIENT_ID = os.getenv("FYERS_CLIENT_ID", "").strip()
+FYERS_CLIENT_ID = os.getenv("FYERS_CLIENT_ID", "").strip()    # e.g. N83MS34FQO-100
+FYERS_SECRET = os.getenv("FYERS_SECRET", "").strip()          # set this in Render env
 FYERS_ACCESS_TOKEN = os.getenv("FYERS_ACCESS_TOKEN", "").strip()
 
 INTERVAL_SECS = int(os.getenv("INTERVAL_SECS", "60"))
@@ -52,7 +55,6 @@ app = Flask(__name__)
 # ------------------------------------------------------------
 # Helpers
 # ------------------------------------------------------------
-
 def call_webapp(action, payload=None, timeout=25):
     if payload is None:
         payload = {}
@@ -68,8 +70,8 @@ def call_webapp(action, payload=None, timeout=25):
 def set_state(key, value):
     try:
         call_webapp("setState", {"key": key, "value": str(value)})
-    except:
-        pass
+    except Exception as e:
+        print("set_state error:", e)
 
 def now_time():
     return time.strftime("%H:%M")
@@ -78,7 +80,7 @@ def within(t, A, B):
     return A <= t <= B
 
 # ------------------------------------------------------------
-# 1) Historical Candle Fetch (3 candles)
+# 1) Historical Candle Fetch (3 candles)  (demo / stub)
 # ------------------------------------------------------------
 def fetch_historical(symbol):
     """Fetch 3 historical candles (9:15-20, 20-25, 25-30)"""
@@ -100,7 +102,6 @@ def fetch_historical(symbol):
         })
 
     return candles
-
 
 def run_historical_fill(stocks):
     global HIST_DONE
@@ -127,7 +128,6 @@ def compute_bias():
     bias = "BUY" if adv > dec else "SELL"
     strength = (adv * 100) / (adv + dec)
     return bias, strength
-
 
 def run_bias_sector_stock():
     global BIAS_DONE
@@ -162,14 +162,11 @@ def run_bias_sector_stock():
 def on_message(msg):
     print("WS Tick:", msg)
 
-
 def on_error(e):
     print("WS ERROR:", e)
 
-
 def on_close(e):
     print("WS CLOSED:", e)
-
 
 def on_open():
     global FYERS_WS, SUBSCRIBED
@@ -177,10 +174,9 @@ def on_open():
         FYERS_WS.subscribe(symbols=list(SUBSCRIBED), data_type="SymbolUpdate")
     FYERS_WS.keep_running()
 
-
 def start_ws():
     """Start WebSocket only if library is present"""
-    global FYERS_WS
+    global FYERS_WS, FYERS_ACCESS_TOKEN
     if not FYERS_WS_AVAILABLE:
         print("⚠️ WebSocket skipped (library missing)")
         return
@@ -206,7 +202,6 @@ def start_ws():
     except Exception as e:
         print("❌ WS startup error:", e)
 
-
 # ------------------------------------------------------------
 # 4) LIVE ENGINE (After 09:30)
 # ------------------------------------------------------------
@@ -223,7 +218,6 @@ def start_live_engine(stocks):
 
     start_ws()
     print("🚀 LIVE engine started with symbols:", SUBSCRIBED)
-
 
 # ------------------------------------------------------------
 # MASTER ENGINE LOOP
@@ -264,13 +258,94 @@ def engine_loop():
 
         time.sleep(5)
 
-
 def start_background():
     th = threading.Thread(target=engine_loop, daemon=True)
     th.start()
 
-
 start_background()
+
+# ------------------------------------------------------------
+# FYERS token exchange helpers/routes
+# ------------------------------------------------------------
+def exchange_code_for_token(code):
+    """
+    Exchange authorization code for access token with Fyers.
+    Requires FYERS_CLIENT_ID and FYERS_SECRET to be set in env.
+    """
+    global FYERS_CLIENT_ID, FYERS_SECRET
+    if not FYERS_CLIENT_ID or not FYERS_SECRET:
+        return {"ok": False, "error": "Missing FYERS_CLIENT_ID or FYERS_SECRET in environment."}
+
+    token_url = "https://api.fyers.in/api/v2/token"
+    payload = {
+        "grant_type": "authorization_code",
+        "code": code,
+        "client_id": FYERS_CLIENT_ID,
+        "secret_key": FYERS_SECRET,
+        # include redirect_uri if Fyers requires exact match
+        "redirect_uri": WEBAPP_URL or ""
+    }
+
+    try:
+        resp = requests.post(token_url, data=payload, timeout=20)
+        try:
+            data = resp.json()
+        except Exception:
+            data = {"raw": resp.text}
+        if resp.status_code != 200:
+            return {"ok": False, "error": "token endpoint error", "status": resp.status_code, "response": data}
+        # Fyers typically returns an access_token field
+        access_token = data.get("access_token") or data.get("access_token", None)
+        return {"ok": True, "data": data, "access_token": access_token}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+@app.route("/fyers-redirect", methods=["GET"])
+def fyers_redirect():
+    """
+    Route to receive the authorization code from Fyers.
+    Fyers will redirect user here with ?code=...&state=...
+    This endpoint will exchange the code for an access token and save it via set_state
+    """
+    global FYERS_ACCESS_TOKEN
+    code = request.args.get("code")
+    state = request.args.get("state")
+    if not code:
+        return "Missing code parameter", 400
+
+    print("🔔 /fyers-redirect received code:", code, " state:", state)
+
+    # Exchange code for token
+    res = exchange_code_for_token(code)
+    if not res.get("ok"):
+        print("❌ token exchange failed:", res)
+        return jsonify({"ok": False, "error": res}), 500
+
+    token = res.get("access_token")
+    if not token:
+        # If token absent, return full data for debugging
+        print("⚠️ token not found in response:", res.get("data"))
+        return jsonify({"ok": False, "message": "No access_token in response", "response": res.get("data")}), 500
+
+    # Save token in memory (process) and push to WebApp (sheet/state)
+    FYERS_ACCESS_TOKEN = token
+    try:
+        set_state("FYERS_ACCESS_TOKEN", token)
+        print("✅ FYERS_ACCESS_TOKEN saved to WebApp state.")
+    except Exception as e:
+        print("❌ Error saving token to webapp/state:", e)
+
+    # Optionally return a friendly page
+    return "Access token received and saved. You can close this window.", 200
+
+@app.route("/get-access-token", methods=["GET"])
+def get_access_token_route():
+    """
+    Debug route to fetch current token from process env/state
+    """
+    token = FYERS_ACCESS_TOKEN or os.getenv("FYERS_ACCESS_TOKEN", "")
+    present = bool(token)
+    return jsonify({"access_token_present": present, "access_token_preview": (token[:6] + "..." + token[-6:]) if present else ""})
 
 # ------------------------------------------------------------
 # API ROUTES
@@ -287,7 +362,6 @@ def wscheck():
         "websocket_started": True if FYERS_WS else False,
         "subscribed": list(SUBSCRIBED)
     })
-
 
 # ------------------------------------------------------------
 # RUN SERVER
