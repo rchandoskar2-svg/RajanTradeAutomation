@@ -417,3 +417,47 @@ def test_push_trade_exit():
 if __name__ == "__main__":
     port = int(os.getenv("PORT", "10000"))
     app.run(host="0.0.0.0", port=port)
+
+
+# ===============================
+# FYERS WS TICK TEST (TEMP)
+# ===============================
+
+from fyers_apiv3.FyersWebsocket import data_ws
+import os
+
+@app.route("/ws-test", methods=["GET"])
+def ws_test():
+    access_token = os.getenv("FYERS_ACCESS_TOKEN")
+
+    if not access_token:
+        return "FYERS_ACCESS_TOKEN missing", 400
+
+    def onmessage(message):
+        print("WS TICK:", message)
+
+    def onerror(message):
+        print("WS ERROR:", message)
+
+    def onclose(message):
+        print("WS CLOSED:", message)
+
+    def onopen():
+        symbols = ["NSE:SBIN-EQ"]
+        fyers.subscribe(symbols=symbols, data_type="SymbolUpdate")
+        fyers.keep_running()
+
+    fyers = data_ws.FyersDataSocket(
+        access_token=access_token,
+        log_path="",
+        litemode=False,
+        write_to_file=False,
+        reconnect=True,
+        on_connect=onopen,
+        on_close=onclose,
+        on_error=onerror,
+        on_message=onmessage
+    )
+
+    fyers.connect()
+    return "WS TEST STARTED – check Render logs", 200
