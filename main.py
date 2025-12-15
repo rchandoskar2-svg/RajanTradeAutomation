@@ -461,3 +461,47 @@ def ws_test():
 
     fyers.connect()
     return "WS TEST STARTED – check Render logs", 200
+
+# =====================================================
+# TEMP : FYERS WEBSOCKET LIVE TICK TEST (NO STRATEGY)
+# =====================================================
+
+from fyers_apiv3.FyersWebsocket import data_ws
+import os
+
+@app.route("/ws-test", methods=["GET"])
+def ws_test():
+    access_token = os.getenv("FYERS_ACCESS_TOKEN")
+
+    if not access_token:
+        return "FYERS_ACCESS_TOKEN missing in ENV", 400
+
+    def onmessage(message):
+        print("WS TICK >>>", message)
+
+    def onerror(message):
+        print("WS ERROR >>>", message)
+
+    def onclose(message):
+        print("WS CLOSED >>>", message)
+
+    def onopen():
+        print("WS CONNECTED >>> subscribing")
+        symbols = ["NSE:SBIN-EQ"]
+        fyers.subscribe(symbols=symbols, data_type="SymbolUpdate")
+        fyers.keep_running()
+
+    fyers = data_ws.FyersDataSocket(
+        access_token=access_token,   # format: APP_ID:ACCESS_TOKEN
+        log_path="",
+        litemode=False,
+        write_to_file=False,
+        reconnect=True,
+        on_connect=onopen,
+        on_close=onclose,
+        on_error=onerror,
+        on_message=onmessage
+    )
+
+    fyers.connect()
+    return "WS TEST STARTED – check Render logs", 200
