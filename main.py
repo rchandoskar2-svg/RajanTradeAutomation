@@ -1,5 +1,5 @@
 # =====================================================
-# Historical Candle Fetch – TEST ONLY
+# Render Safe – Historical Candle Fetch + Keep Alive
 # =====================================================
 
 from fyers_apiv3 import fyersModel
@@ -11,7 +11,7 @@ from datetime import datetime
 # ---------- ENV ----------
 FYERS_CLIENT_ID = os.environ["FYERS_CLIENT_ID"]
 FYERS_ACCESS_TOKEN = os.environ["FYERS_ACCESS_TOKEN"]
-WEBAPP_URL = os.environ["WEBAPP_URL"]   # ends with /exec
+WEBAPP_URL = os.environ["WEBAPP_URL"]
 SYMBOL = "NSE:SBIN-EQ"
 
 # ---------- FYERS ----------
@@ -38,7 +38,6 @@ def push_candle(c):
     print("PUSH:", payload, r.text)
 
 def fetch_first_3_candles():
-    # 9:15–9:30 = first 3 candles
     data = {
         "symbol": SYMBOL,
         "resolution": "5",
@@ -53,9 +52,7 @@ def fetch_first_3_candles():
 
     print("TOTAL CANDLES:", len(candles))
 
-    first_three = candles[:3]
-
-    for c in first_three:
+    for c in candles[:3]:
         candle = {
             "time": datetime.fromtimestamp(c[0]).strftime("%H:%M:%S"),
             "open": c[1],
@@ -68,5 +65,18 @@ def fetch_first_3_candles():
         push_candle(candle)
         time.sleep(1)
 
+# ---------- MAIN ----------
 if __name__ == "__main__":
+    print("Starting historical fetch...")
     fetch_first_3_candles()
+    print("Historical fetch done. Keeping Render alive...")
+
+    # 🔒 KEEP RENDER ALIVE
+    while True:
+        try:
+            requests.get(WEBAPP_URL + "?action=ping", timeout=10)
+            print("Ping OK")
+        except Exception as e:
+            print("Ping error:", e)
+
+        time.sleep(60)
