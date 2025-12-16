@@ -1,26 +1,32 @@
 # =====================================================
-# Render Safe – Historical Candle Fetch + Keep Alive
+# Render Free Web Service
+# Historical Candle Fetch (ONCE) + Flask Keep Alive
 # =====================================================
 
-from fyers_apiv3 import fyersModel
-import requests
-import os
+from flask import Flask
+import threading
 import time
+import os
+import requests
 from datetime import datetime
+from fyers_apiv3 import fyersModel
 
-# ---------- ENV ----------
+# ---------------- ENV ----------------
 FYERS_CLIENT_ID = os.environ["FYERS_CLIENT_ID"]
 FYERS_ACCESS_TOKEN = os.environ["FYERS_ACCESS_TOKEN"]
 WEBAPP_URL = os.environ["WEBAPP_URL"]
-SYMBOL = "NSE:SBIN-EQ"
 
-# ---------- FYERS ----------
+SYMBOL = "NSE:SBIN-EQ"
+PORT = int(os.environ.get("PORT", 10000))
+
+# ---------------- FYERS ----------------
 fyers = fyersModel.FyersModel(
     client_id=FYERS_CLIENT_ID,
     token=FYERS_ACCESS_TOKEN,
     log_path=""
 )
 
+# ---------------- HISTORICAL LOGIC ----------------
 def push_candle(c):
     payload = {
         "action": "pushCandle",
@@ -38,6 +44,8 @@ def push_candle(c):
     print("PUSH:", payload, r.text)
 
 def fetch_first_3_candles():
+    print("Fetching historical candles...")
+
     data = {
         "symbol": SYMBOL,
         "resolution": "5",
@@ -65,18 +73,20 @@ def fetch_first_3_candles():
         push_candle(candle)
         time.sleep(1)
 
-# ---------- MAIN ----------
+    print("Historical candles DONE.")
+
+# ---------------- FLASK ----------------
+app = Flask(__name__)
+
+@app.route("/")
+def home():
+    return "RajanTradeAutomation - Historical Candle Service Running"
+
+# ---------------- STARTUP ----------------
 if __name__ == "__main__":
-    print("Starting historical fetch...")
-    fetch_first_3_candles()
-    print("Historical fetch done. Keeping Render alive...")
+    # Run historical fetch in background ONCE
+    t = threading.Thread(target=fetch_first_3_candles, daemon=True)
+    t.start()
 
-    # 🔒 KEEP RENDER ALIVE
-    while True:
-        try:
-            requests.get(WEBAPP_URL + "?action=ping", timeout=10)
-            print("Ping OK")
-        except Exception as e:
-            print("Ping error:", e)
-
-        time.sleep(60)
+    # Start web server (MANDATORY for free Render)
+    app.run(host="0.0.0.0", port=PORT)
