@@ -1,50 +1,7 @@
-# =====================================================
-# Render Free Web Service
-# Historical Candle Fetch (ONCE) + Flask Keep Alive
-# =====================================================
-
-from flask import Flask
-import threading
-import time
-import os
-import requests
-from datetime import datetime
-from fyers_apiv3 import fyersModel
-
-# ---------------- ENV ----------------
-FYERS_CLIENT_ID = os.environ["FYERS_CLIENT_ID"]
-FYERS_ACCESS_TOKEN = os.environ["FYERS_ACCESS_TOKEN"]
-WEBAPP_URL = os.environ["WEBAPP_URL"]
-
-SYMBOL = "NSE:SBIN-EQ"
-PORT = int(os.environ.get("PORT", 10000))
-
-# ---------------- FYERS ----------------
-fyers = fyersModel.FyersModel(
-    client_id=FYERS_CLIENT_ID,
-    token=FYERS_ACCESS_TOKEN,
-    log_path=""
-)
-
-# ---------------- HISTORICAL LOGIC ----------------
-def push_candle(c):
-    payload = {
-        "action": "pushCandle",
-        "symbol": SYMBOL,
-        "tf": "5m",
-        "time": c["time"],
-        "o": c["open"],
-        "h": c["high"],
-        "l": c["low"],
-        "c": c["close"],
-        "v": c["volume"],
-        "source": "HIST"
-    }
-    r = requests.post(WEBAPP_URL, json=payload, timeout=10)
-    print("PUSH:", payload, r.text)
+from datetime import datetime, time as dtime
 
 def fetch_first_3_candles():
-    print("Fetching historical candles...")
+    print("Fetching 9:15–9:30 historical candles...")
 
     data = {
         "symbol": SYMBOL,
@@ -58,35 +15,37 @@ def fetch_first_3_candles():
     resp = fyers.history(data)
     candles = resp.get("candles", [])
 
-    print("TOTAL CANDLES:", len(candles))
+    target = []
 
-    for c in candles[:3]:
-        candle = {
-            "time": datetime.fromtimestamp(c[0]).strftime("%H:%M:%S"),
-            "open": c[1],
-            "high": c[2],
-            "low": c[3],
-            "close": c[4],
-            "volume": c[5]
-        }
+    for c in candles:
+        ts = datetime.fromtimestamp(c[0])
+        t = ts.time()
+
+        # 🎯 STRICT TIME FILTER
+        if dtime(9, 15) <= t < dtime(9, 30):
+            if c[5] > 0:  # volume check
+                target.append({
+                    "time": ts.strftime("%H:%M:%S"),
+                    "open": c[1],
+                    "high": c[2],
+                    "low": c[3],
+                    "close": c[4],
+                    "volume": c[5]
+                })
+
+    # sort just in case
+    target.sort(key=lambda x: x["time"])
+
+    print("Filtered candles:", target)
+
+    # ✅ FINAL SAFETY CHECK
+    if len(target) != 3:
+        print("❌ ERROR: Expected 3 candles, got", len(target))
+        return
+
+    for candle in target:
         print("HIST:", candle)
         push_candle(candle)
         time.sleep(1)
 
-    print("Historical candles DONE.")
-
-# ---------------- FLASK ----------------
-app = Flask(__name__)
-
-@app.route("/")
-def home():
-    return "RajanTradeAutomation - Historical Candle Service Running"
-
-# ---------------- STARTUP ----------------
-if __name__ == "__main__":
-    # Run historical fetch in background ONCE
-    t = threading.Thread(target=fetch_first_3_candles, daemon=True)
-    t.start()
-
-    # Start web server (MANDATORY for free Render)
-    app.run(host="0.0.0.0", port=PORT)
+    print("✅ 9:15–9:30 historical candles DONE")
