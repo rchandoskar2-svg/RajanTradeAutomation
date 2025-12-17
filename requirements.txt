@@ -1,4 +1,4 @@
 flask
 requests
 fyers-apiv3
-python-dateutil
+pytz
