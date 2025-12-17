@@ -1,6 +1,4 @@
 flask
 requests
-pytz
 fyers-apiv3
-nsetools
-setuptools
+python-dateutil
