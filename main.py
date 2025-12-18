@@ -1,6 +1,7 @@
 # ============================================================
-# RajanTradeAutomation – LIVE WS TEST (5 Stocks Only)
-# Purpose: Verify FYERS Live Data + 5-min Candles on Render
+# RajanTradeAutomation – LIVE WS TEST (STABLE – RENDER SAFE)
+# Strategy start: 11:15
+# Purpose: Verify FYERS Live Data + 5-min Candles
 # ============================================================
 
 from flask import Flask
@@ -35,7 +36,7 @@ def ping():
 # ------------------------------------------------------------
 # CONFIG
 CANDLE_INTERVAL = 300  # 5 minutes
-STRATEGY_START_HHMM = "11:00"  # test window start
+STRATEGY_START_HHMM = "11:15"  # 🔥 UPDATED AS REQUESTED
 
 SYMBOLS = [
     "NSE:SBIN-EQ",
@@ -149,10 +150,10 @@ def start_ws():
 
 # ------------------------------------------------------------
 if __name__ == "__main__":
-    # Start WebSocket in background
-    t = threading.Thread(target=start_ws, daemon=True)
-    t.start()
+    # 🔥 IMPORTANT: WS runs as NON-DAEMON thread (Render safe)
+    ws_thread = threading.Thread(target=start_ws)
+    ws_thread.start()
 
-    # Start Flask (for ping)
+    # Flask runs in main thread
     port = int(os.getenv("PORT", "10000"))
     app.run(host="0.0.0.0", port=port)
