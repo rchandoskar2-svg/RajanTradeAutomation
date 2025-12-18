@@ -1,111 +1,93 @@
 # ============================================================
-# RajanTradeAutomation – FYERS WS DEBUG (Render runtime pip fix)
+# RajanTradeAutomation – Render WS Debug Stable
 # ============================================================
 
 import os
-import sys
-import subprocess
-import time
 import threading
+import time
+import traceback
 from flask import Flask
 
-print("🚀 main.py STARTED")
-
 # ------------------------------------------------------------
-# FORCE setuptools<81 AT RUNTIME (RENDER ONLY)
+# BASIC LOG
 # ------------------------------------------------------------
-def ensure_setuptools():
-    try:
-        import setuptools
-        ver = setuptools.__version__
-        print("🔧 setuptools version detected:", ver)
-        major = int(ver.split(".")[0])
-        if major >= 81:
-            raise Exception("setuptools too new")
-    except Exception:
-        print("⚠️ Installing setuptools<81 at runtime")
-        subprocess.check_call(
-            [sys.executable, "-m", "pip", "install", "--no-cache-dir", "setuptools<81"]
-        )
-        print("✅ setuptools<81 installed, RESTART REQUIRED")
-        os.execv(sys.executable, [sys.executable] + sys.argv)
+def log(msg):
+    print(msg, flush=True)
 
-ensure_setuptools()
+log("🚀 main.py STARTED")
 
 # ------------------------------------------------------------
 # ENV CHECK
 # ------------------------------------------------------------
-FYERS_CLIENT_ID = os.getenv("FYERS_CLIENT_ID", "").strip()
-FYERS_ACCESS_TOKEN = os.getenv("FYERS_ACCESS_TOKEN", "").strip()
+FYERS_CLIENT_ID = os.getenv("FYERS_CLIENT_ID")
+FYERS_ACCESS_TOKEN = os.getenv("FYERS_ACCESS_TOKEN")
 
-print("🔎 ENV CHECK")
-print("FYERS_CLIENT_ID:", FYERS_CLIENT_ID)
-print("FYERS_ACCESS_TOKEN prefix:", FYERS_ACCESS_TOKEN[:15])
+log("🔎 ENV CHECK")
+log(f"FYERS_CLIENT_ID = {FYERS_CLIENT_ID}")
+log(f"FYERS_ACCESS_TOKEN prefix = {FYERS_ACCESS_TOKEN[:20] if FYERS_ACCESS_TOKEN else 'MISSING'}")
 
 if not FYERS_CLIENT_ID or not FYERS_ACCESS_TOKEN:
-    print("❌ FYERS ENV MISSING – EXITING")
-    sys.exit(1)
+    log("❌ FYERS ENV MISSING – EXITING")
+    raise Exception("Missing FYERS env variables")
 
 # ------------------------------------------------------------
-# IMPORT FYERS WS (AFTER SETUPTOOLS FIX)
+# IMPORT FYERS WS
 # ------------------------------------------------------------
-print("📦 Importing fyers_apiv3.FyersWebsocket.data_ws")
-from fyers_apiv3.FyersWebsocket import data_ws
-print("✅ data_ws IMPORT SUCCESS")
+try:
+    log("📦 Importing fyers_apiv3.FyersWebsocket.data_ws")
+    from fyers_apiv3.FyersWebsocket import data_ws
+    log("✅ data_ws IMPORT SUCCESS")
+except Exception as e:
+    log("❌ data_ws IMPORT FAILED")
+    traceback.print_exc()
+    raise e
 
 # ------------------------------------------------------------
-# FLASK (RENDER HEALTH)
+# FLASK (KEEP RENDER ALIVE)
 # ------------------------------------------------------------
 app = Flask(__name__)
 
 @app.route("/")
 def home():
-    return "RajanTradeAutomation WS DEBUG LIVE", 200
+    return "RajanTradeAutomation LIVE"
 
 @app.route("/ping")
 def ping():
-    return "PONG", 200
+    return "PONG"
 
 # ------------------------------------------------------------
-# WS CALLBACKS
+# FYERS CALLBACKS
 # ------------------------------------------------------------
-def onopen():
-    print("🟢 WS CONNECTED")
+def on_open():
+    log("🟢 WS CONNECTED (on_open called)")
 
-def onmessage(message):
-    print("📩 WS MESSAGE")
-    print(message)
+def on_close(message):
+    log(f"🔴 WS CLOSED : {message}")
 
-def onerror(error):
-    print("🔴 WS ERROR")
-    print(error)
+def on_error(message):
+    log(f"❌ WS ERROR : {message}")
 
-def onclose(reason):
-    print("⚫ WS CLOSED")
-    print(reason)
+def on_message(message):
+    log(f"📩 WS MESSAGE : {message}")
 
 # ------------------------------------------------------------
-# WS THREAD
+# START FYERS WS
 # ------------------------------------------------------------
 def start_ws():
     try:
-        print("🔧 Creating FyersDataSocket")
-
-        access_token = f"{FYERS_CLIENT_ID}:{FYERS_ACCESS_TOKEN}"
+        log("🧠 Creating FyersDataSocket")
 
         ws = data_ws.FyersDataSocket(
-            access_token=access_token,
+            access_token=FYERS_ACCESS_TOKEN,
             log_path="",
             litemode=False,
             write_to_file=False,
             reconnect=True,
-            on_connect=onopen,
-            on_close=onclose,
-            on_error=onerror,
-            on_message=onmessage
+            on_open=on_open,
+            on_close=on_close,
+            on_error=on_error,
+            on_message=on_message
         )
-
-        print("✅ FyersDataSocket CREATED")
 
         symbols = [
             "NSE:SBIN-EQ",
@@ -115,33 +97,28 @@ def start_ws():
             "NSE:KOTAKBANK-EQ"
         ]
 
-        print("📡 Subscribing:", symbols)
+        log(f"📡 Subscribing symbols: {symbols}")
+        ws.subscribe(symbols=symbols, data_type="SymbolUpdate")
 
-        ws.subscribe(
-            symbols=symbols,
-            data_type="SymbolUpdate"
-        )
-
-        print("▶ keep_running() called (BLOCKING)")
+        log("🔁 Calling keep_running() (BLOCKING)")
         ws.keep_running()
 
-        print("❌ keep_running EXITED (should NOT happen)")
+        log("❌ keep_running EXITED (SHOULD NOT HAPPEN)")
 
     except Exception as e:
-        print("🔥 WS THREAD EXCEPTION")
-        print(e)
+        log("❌ WS THREAD CRASHED")
+        traceback.print_exc()
 
 # ------------------------------------------------------------
-# START WS THREAD
+# THREAD START
 # ------------------------------------------------------------
-print("🧵 Starting WS thread")
-threading.Thread(target=start_ws, daemon=False).start()
+log("🧵 Starting WS THREAD (daemon=True)")
+ws_thread = threading.Thread(target=start_ws, daemon=True)
+ws_thread.start()
 
 # ------------------------------------------------------------
 # START FLASK
 # ------------------------------------------------------------
-port = int(os.getenv("PORT", "10000"))
-print("🌐 Starting Flask on port", port)
-
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=port)
+PORT = int(os.environ.get("PORT", 10000))
+log(f"🌐 Starting Flask on port {PORT}")
+app.run(host="0.0.0.0", port=PORT)
