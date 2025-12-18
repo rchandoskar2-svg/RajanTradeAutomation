@@ -1,53 +1,47 @@
 # ============================================================
-# RajanTradeAutomation – FYERS WS Debug Stable (Render Ready)
+# RajanTradeAutomation – Render Stable main.py
+# FYERS WebSocket + Flask Ping Server
 # ============================================================
 
 import os
-import threading
 import time
+import threading
 import traceback
-from flask import Flask
+from flask import Flask, jsonify
 
-# -------------------------
-# ENV CHECK
-# -------------------------
 print("🚀 main.py STARTED")
 
+# ------------------------------------------------------------
+# ENV CHECK
+# ------------------------------------------------------------
 FYERS_CLIENT_ID = os.getenv("FYERS_CLIENT_ID")
 FYERS_ACCESS_TOKEN = os.getenv("FYERS_ACCESS_TOKEN")
 
 print("🔍 ENV CHECK")
 print("FYERS_CLIENT_ID =", FYERS_CLIENT_ID)
-print("FYERS_ACCESS_TOKEN prefix =", FYERS_ACCESS_TOKEN[:20] if FYERS_ACCESS_TOKEN else "❌ MISSING")
+print("FYERS_ACCESS_TOKEN prefix =", FYERS_ACCESS_TOKEN[:15] if FYERS_ACCESS_TOKEN else "MISSING")
 
 if not FYERS_CLIENT_ID or not FYERS_ACCESS_TOKEN:
-    raise Exception("❌ FYERS ENV variables missing")
+    raise RuntimeError("❌ FYERS ENV variables missing")
 
-# -------------------------
-# FYERS WS IMPORT
-# -------------------------
-print("📦 Importing fyers_apiv3.FyersWebsocket.data_ws")
-
-from fyers_apiv3.FyersWebsocket import data_ws
-
-print("✅ data_ws IMPORT SUCCESS")
-
-# -------------------------
-# FLASK (Render needs port bind)
-# -------------------------
+# ------------------------------------------------------------
+# Flask App (Render Ping / UptimeRobot)
+# ------------------------------------------------------------
 app = Flask(__name__)
 
-@app.route("/")
+@app.route("/", methods=["GET", "HEAD"])
 def home():
-    return "RajanTradeAutomation LIVE"
+    return jsonify({"ok": True, "status": "alive"})
 
-@app.route("/ping")
+@app.route("/ping", methods=["GET"])
 def ping():
-    return "PONG"
+    return jsonify({"pong": True})
 
-# -------------------------
-# FYERS CALLBACKS
-# -------------------------
+# ------------------------------------------------------------
+# FYERS WebSocket
+# ------------------------------------------------------------
+from fyers_apiv3.FyersWebsocket import data_ws
+
 def on_message(message):
     print("📩 WS MESSAGE:", message)
 
@@ -57,12 +51,9 @@ def on_error(error):
 def on_close(message):
     print("🔌 WS CLOSED:", message)
 
-# -------------------------
-# WS THREAD
-# -------------------------
 def start_ws():
     try:
-        print("🧠 Creating FyersDataSocket")
+        print("🧵 WS THREAD STARTED")
 
         ws = data_ws.FyersDataSocket(
             access_token=FYERS_ACCESS_TOKEN,
@@ -75,8 +66,6 @@ def start_ws():
             on_close=on_close
         )
 
-        print("✅ FyersDataSocket CREATED")
-
         symbols = [
             "NSE:SBIN-EQ",
             "NSE:RELIANCE-EQ",
@@ -88,25 +77,23 @@ def start_ws():
         print("📡 Subscribing symbols:", symbols)
         ws.subscribe(symbols=symbols, data_type="SymbolUpdate")
 
-        print("🔁 keep_running() START (blocking)")
-        ws.keep_running()
-
-        print("⚠️ keep_running EXITED (should NOT happen)")
+        print("✅ WS CONNECT CALLED")
+        ws.connect()
 
     except Exception as e:
         print("🔥 WS THREAD CRASHED")
         traceback.print_exc()
 
-# -------------------------
+# ------------------------------------------------------------
 # START WS THREAD
-# -------------------------
-ws_thread = threading.Thread(target=start_ws)
+# ------------------------------------------------------------
+ws_thread = threading.Thread(target=start_ws, daemon=True)
 ws_thread.start()
-print("🧵 WS THREAD STARTED")
 
-# -------------------------
-# START FLASK
-# -------------------------
-port = int(os.environ.get("PORT", 10000))
-print(f"🌐 Starting Flask on port {port}")
-app.run(host="0.0.0.0", port=port)
+# ------------------------------------------------------------
+# START FLASK (Render expects this)
+# ------------------------------------------------------------
+PORT = int(os.getenv("PORT", 10000))
+print(f"🌐 Starting Flask on port {PORT}")
+
+app.run(host="0.0.0.0", port=PORT, debug=False)
