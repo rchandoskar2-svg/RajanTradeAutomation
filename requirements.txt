@@ -2,4 +2,4 @@ flask
 requests
 fyers-apiv3
 pytz
-setuptools
+setuptools<81
