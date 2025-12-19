@@ -1,16 +1,17 @@
 # ============================================================
-# RajanTradeAutomation – main.py (Render Stable WS Version)
-# FIXED: setuptools<81, FYERS WS, Render-safe threading
-# + ADDED: FYERS CALLBACK URI ROUTE
+# RajanTradeAutomation – main.py
+# LIVE FYERS WS + 5-Minute Candle Engine
+# BASE LOCKED: Flask + Callback + WS thread MUST NOT CHANGE
 # ============================================================
 
 import os
 import time
 import threading
+from datetime import datetime
 from flask import Flask, jsonify, request
 
 # ------------------------------------------------------------
-# Basic Logs
+# START LOG
 # ------------------------------------------------------------
 print("🚀 main.py STARTED")
 
@@ -36,19 +37,15 @@ app = Flask(__name__)
 def health():
     return jsonify({
         "status": "ok",
-        "service": "RajanTradeAutomation"
+        "service": "RajanTradeAutomation",
+        "time": datetime.now().strftime("%H:%M:%S")
     })
 
 # ✅ REQUIRED FOR FYERS AUTH FLOW
 @app.route("/callback")
 def fyers_callback():
-    """
-    FYERS redirects here with ?auth_code=XXXX
-    This route MUST exist, else token generation fails
-    """
     auth_code = request.args.get("auth_code")
-    print("🔑 FYERS CALLBACK HIT")
-    print("🔑 AUTH CODE =", auth_code)
+    print("🔑 FYERS CALLBACK HIT | AUTH CODE =", auth_code)
 
     if not auth_code:
         return jsonify({"error": "auth_code missing"}), 400
@@ -66,10 +63,82 @@ from fyers_apiv3.FyersWebsocket import data_ws
 print("✅ data_ws IMPORT SUCCESS")
 
 # ------------------------------------------------------------
+# 5-MINUTE CANDLE ENGINE (IN-MEMORY)
+# ------------------------------------------------------------
+CANDLE_INTERVAL = 300  # 5 minutes (300 sec)
+
+# candle_state[symbol] = {
+#   bucket,
+#   open, high, low, close,
+#   volume,
+#   start_time
+# }
+candle_state = {}
+
+def get_bucket(ts):
+    return ts - (ts % CANDLE_INTERVAL)
+
+def finalize_candle(symbol, candle):
+    print(
+        f"🕯️ 5m CANDLE CLOSED | {symbol} | "
+        f"O:{candle['open']} H:{candle['high']} "
+        f"L:{candle['low']} C:{candle['close']} "
+        f"V:{candle['volume']} | "
+        f"@ {datetime.fromtimestamp(candle['start_time']).strftime('%H:%M')}"
+    )
+
+# ------------------------------------------------------------
 # WebSocket Callbacks
 # ------------------------------------------------------------
 def on_message(message):
-    print("📩 WS MESSAGE:", message)
+    try:
+        if message.get("type") != "sf":
+            return
+
+        symbol = message["symbol"]
+        ltp = float(message["ltp"])
+        volume = int(message.get("last_traded_qty", 0))
+        ts = int(message.get("last_traded_time", time.time()))
+
+        bucket = get_bucket(ts)
+
+        if symbol not in candle_state:
+            candle_state[symbol] = {
+                "bucket": bucket,
+                "open": ltp,
+                "high": ltp,
+                "low": ltp,
+                "close": ltp,
+                "volume": volume,
+                "start_time": bucket
+            }
+            return
+
+        candle = candle_state[symbol]
+
+        # SAME 5-MIN BUCKET
+        if bucket == candle["bucket"]:
+            candle["high"] = max(candle["high"], ltp)
+            candle["low"] = min(candle["low"], ltp)
+            candle["close"] = ltp
+            candle["volume"] += volume
+
+        # NEW 5-MIN BUCKET → CLOSE OLD
+        else:
+            finalize_candle(symbol, candle)
+
+            candle_state[symbol] = {
+                "bucket": bucket,
+                "open": ltp,
+                "high": ltp,
+                "low": ltp,
+                "close": ltp,
+                "volume": volume,
+                "start_time": bucket
+            }
+
+    except Exception as e:
+        print("🔥 on_message ERROR:", e)
 
 def on_error(message):
     print("❌ WS ERROR:", message)
