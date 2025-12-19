@@ -1,6 +1,6 @@
 # ============================================================
 # RajanTradeAutomation – main.py
-# LIVE FYERS WS + 5-Minute Candle Engine
+# LIVE FYERS WS + 5-Minute Candle Engine + Watchdog
 # BASE LOCKED: Flask + Callback + WS thread MUST NOT CHANGE
 # ============================================================
 
@@ -23,7 +23,10 @@ FYERS_ACCESS_TOKEN = os.getenv("FYERS_ACCESS_TOKEN")
 
 print("🔍 ENV CHECK")
 print("FYERS_CLIENT_ID =", FYERS_CLIENT_ID)
-print("FYERS_ACCESS_TOKEN prefix =", FYERS_ACCESS_TOKEN[:20] if FYERS_ACCESS_TOKEN else "❌ MISSING")
+print(
+    "FYERS_ACCESS_TOKEN prefix =",
+    FYERS_ACCESS_TOKEN[:20] if FYERS_ACCESS_TOKEN else "❌ MISSING"
+)
 
 if not FYERS_CLIENT_ID or not FYERS_ACCESS_TOKEN:
     raise Exception("❌ FYERS ENV variables missing")
@@ -63,15 +66,17 @@ from fyers_apiv3.FyersWebsocket import data_ws
 print("✅ data_ws IMPORT SUCCESS")
 
 # ------------------------------------------------------------
+# GLOBAL WS STATE (WATCHDOG)
+# ------------------------------------------------------------
+last_tick_time = 0
+
+# ------------------------------------------------------------
 # 5-MINUTE CANDLE ENGINE (IN-MEMORY)
 # ------------------------------------------------------------
-CANDLE_INTERVAL = 300  # 5 minutes (300 sec)
+CANDLE_INTERVAL = 300  # 5 minutes
 
 # candle_state[symbol] = {
-#   bucket,
-#   open, high, low, close,
-#   volume,
-#   start_time
+#   bucket, open, high, low, close, volume, start_time
 # }
 candle_state = {}
 
@@ -91,9 +96,12 @@ def finalize_candle(symbol, candle):
 # WebSocket Callbacks
 # ------------------------------------------------------------
 def on_message(message):
+    global last_tick_time
     try:
         if message.get("type") != "sf":
             return
+
+        last_tick_time = time.time()
 
         symbol = message["symbol"]
         ltp = float(message["ltp"])
@@ -116,14 +124,14 @@ def on_message(message):
 
         candle = candle_state[symbol]
 
-        # SAME 5-MIN BUCKET
+        # SAME BUCKET
         if bucket == candle["bucket"]:
             candle["high"] = max(candle["high"], ltp)
             candle["low"] = min(candle["low"], ltp)
             candle["close"] = ltp
             candle["volume"] += volume
 
-        # NEW 5-MIN BUCKET → CLOSE OLD
+        # NEW BUCKET → CLOSE OLD
         else:
             finalize_candle(symbol, candle)
 
@@ -189,10 +197,30 @@ def start_ws():
         print("🔥 WS THREAD CRASHED:", e)
 
 # ------------------------------------------------------------
-# Launch WS in daemon thread
+# WS WATCHDOG (AUTO-REVIVE FOR RENDER)
+# ------------------------------------------------------------
+def ws_watchdog():
+    global last_tick_time
+    while True:
+        time.sleep(15)
+        if last_tick_time == 0:
+            continue
+
+        if time.time() - last_tick_time > 20:
+            print("⚠️ WS STALE – RECONNECTING")
+            try:
+                fyers_ws.connect()
+            except Exception as e:
+                print("🔥 WS RECONNECT FAILED:", e)
+
+# ------------------------------------------------------------
+# Launch Threads
 # ------------------------------------------------------------
 ws_thread = threading.Thread(target=start_ws, daemon=True)
 ws_thread.start()
+
+watchdog_thread = threading.Thread(target=ws_watchdog, daemon=True)
+watchdog_thread.start()
 
 # ------------------------------------------------------------
 # Start Flask (MAIN THREAD)
