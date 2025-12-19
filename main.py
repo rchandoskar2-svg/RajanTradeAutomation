@@ -1,8 +1,8 @@
 # ============================================================
-# RajanTradeAutomation – main.py (Render Stable WS Version)
-# FIXED: setuptools<81, FYERS WS, Render-safe threading
-# + FYERS CALLBACK URI ROUTE
-# + LOCAL-PROVEN 5-MIN CANDLE BUILD (CUM VOL BASED)
+# RajanTradeAutomation – main.py
+# Render Stable WS + Local-Proven 5m Candle
+# + Volume Verification Debug
+# + Test /status Route
 # ============================================================
 
 import os
@@ -12,7 +12,7 @@ from datetime import datetime
 from flask import Flask, jsonify, request
 
 # ------------------------------------------------------------
-# Basic Logs
+# START LOG
 # ------------------------------------------------------------
 print("🚀 main.py STARTED")
 
@@ -41,7 +41,26 @@ app = Flask(__name__)
 def health():
     return jsonify({
         "status": "ok",
-        "service": "RajanTradeAutomation"
+        "service": "RajanTradeAutomation",
+        "time": datetime.now().strftime("%H:%M:%S")
+    })
+
+# 🔎 TEST ROUTE (browser friendly)
+@app.route("/status")
+def status():
+    return jsonify({
+        "active_symbols": list(candles.keys()),
+        "current_candles": {
+            s: {
+                "start": c["start"],
+                "open": c["open"],
+                "high": c["high"],
+                "low": c["low"],
+                "close": c["close"],
+                "cum_vol": c["cum_vol"]
+            }
+            for s, c in candles.items()
+        }
     })
 
 # ✅ REQUIRED FOR FYERS AUTH FLOW
@@ -66,7 +85,7 @@ from fyers_apiv3.FyersWebsocket import data_ws
 print("✅ data_ws IMPORT SUCCESS")
 
 # ------------------------------------------------------------
-# 5-MIN CANDLE ENGINE (LOCAL-PROVEN LOGIC)
+# 5-MIN CANDLE ENGINE (LOCAL-PROVEN + DEBUG)
 # ------------------------------------------------------------
 CANDLE_INTERVAL = 300  # 5 minutes
 
@@ -79,8 +98,16 @@ def get_candle_start(ts):
 def close_candle(symbol, c):
     prev_vol = last_candle_vol.get(symbol, c["cum_vol"])
     candle_volume = c["cum_vol"] - prev_vol
+
+    # 🔎 DEBUG (VERIFICATION)
+    print(
+        f"🔎 VOL DEBUG | {symbol} | "
+        f"prev_cum={prev_vol} curr_cum={c['cum_vol']} diff={candle_volume}"
+    )
+
     last_candle_vol[symbol] = c["cum_vol"]
 
+    # 🟩 FINAL CANDLE PRINT
     print(
         f"\n🟩 5m CANDLE {symbol}"
         f"\nTime : {time.strftime('%H:%M:%S', time.localtime(c['start']))}"
@@ -129,10 +156,9 @@ def update_candle_from_tick(msg):
 # WebSocket Callbacks
 # ------------------------------------------------------------
 def on_message(message):
-    # 🔒 EXISTING BEHAVIOUR (UNCHANGED)
+    # 🔒 Existing behaviour untouched
     print("📩 WS MESSAGE:", message)
 
-    # 🔹 EXACT LOCAL CANDLE LOGIC
     try:
         update_candle_from_tick(message)
     except Exception as e:
