@@ -1,45 +1,40 @@
 # ============================================================
-# RajanTradeAutomation – main.py (HARD-CODED UNIVERSE)
-# Ticks + 5m Candles | Start >= 15:20 IST
+# RajanTradeAutomation – main.py (UNIVERSE DRIVEN)
+# FYERS Live Ticks → 5m Candles → Google Sheets
+# Start Time: 09:15 IST
 # ============================================================
 
-import os, time, threading, requests
+import os
+import time
+import threading
+import requests
 from datetime import datetime
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify
 from fyers_apiv3.FyersWebsocket import data_ws
 
 # ===================== CONFIG =====================
 FYERS_ACCESS_TOKEN = os.getenv("FYERS_ACCESS_TOKEN")
-WEBAPP_URL = os.getenv("WEBAPP_URL")  # Google Apps Script WebApp URL
+WEBAPP_URL = os.getenv("WEBAPP_URL")   # Google Apps Script WebApp URL
 
-# ---- HARD-CODED UNIVERSE (from your PDF) ----
-# NOTE: Symbols normalized to FYERS format NSE:<SYMBOL>-EQ
-SYMBOLS = [
-    "NSE:TIINDIA-EQ","NSE:KOTAKBANK-EQ","NSE:TATACONSUM-EQ","NSE:LICHSGFIN-EQ","NSE:UBL-EQ",
-    "NSE:TVSMOTOR-EQ","NSE:MUTHOOTFIN-EQ","NSE:INDUSINDBK-EQ","NSE:BAJAJ-AUTO-EQ",
-    "NSE:BHARTIARTL-EQ","NSE:AXISBANK-EQ","NSE:HDFCBANK-EQ","NSE:SBIN-EQ",
-    "NSE:ICICIBANK-EQ","NSE:RELIANCE-EQ","NSE:INFY-EQ","NSE:TCS-EQ",
-    "NSE:LT-EQ","NSE:MARUTI-EQ","NSE:ASIANPAINT-EQ",
-    # --- (remaining symbols from your master list are included similarly) ---
-]
-
-# ===================== TIME WINDOW =====================
 CANDLE_INTERVAL = 300  # 5 minutes
-START_MIN = 15 * 60 + 20   # 15:20
-END_MIN   = 15 * 60 + 30   # 15:30
+START_MIN = 9 * 60 + 15
+END_MIN   = 15 * 60 + 30
 
 # ===================== STATE =====================
-candles = {}           # symbol -> current candle
-last_candle_vol = {}   # symbol -> last cum vol
+candles = {}            # symbol -> current candle
+last_candle_vol = {}    # symbol -> last cumulative volume
+SYMBOLS = []
 
 # ===================== FLASK =====================
 app = Flask(__name__)
 
 @app.route("/")
 def health():
-    return jsonify({"status": "ok", "symbols": len(SYMBOLS)})
+    return jsonify({
+        "status": "ok",
+        "symbols": len(SYMBOLS)
+    })
 
-# FYERS redirect must exist
 @app.route("/callback")
 def callback():
     return jsonify({"ok": True})
@@ -52,6 +47,20 @@ def minutes_now():
 def bucket(ts):
     return ts - (ts % CANDLE_INTERVAL)
 
+# ===================== UNIVERSE LOADER =====================
+def load_universe():
+    try:
+        payload = {"action": "getUniverse"}
+        r = requests.post(WEBAPP_URL, json=payload, timeout=15)
+        data = r.json()
+        syms = data.get("symbols", [])
+        print(f"✅ Universe loaded: {len(syms)} symbols")
+        return syms
+    except Exception as e:
+        print("❌ Universe load failed:", e)
+        return []
+
+# ===================== PUSH CANDLE =====================
 def push_candle(symbol, c):
     prev = last_candle_vol.get(symbol, c["cum_vol"])
     vol = c["cum_vol"] - prev
@@ -72,6 +81,77 @@ def push_candle(symbol, c):
             }]
         }
     }
+
     try:
         requests.post(WEBAPP_URL, json=payload, timeout=4)
-        print("📤 Candle pushed:
+        print(f"📤 Candle pushed {symbol} @ {payload['payload']['candles'][0]['time']}")
+    except Exception as e:
+        print("❌ Candle push failed:", e)
+
+# ===================== WS CALLBACKS =====================
+def onmessage(msg):
+    if "symbol" not in msg or "ltp" not in msg:
+        return
+
+    symbol = msg["symbol"]
+    ltp = msg["ltp"]
+    ts = int(msg.get("timestamp", time.time()))
+    cum_vol = msg.get("vol_traded_today", 0)
+
+    now_min = minutes_now()
+    if now_min < START_MIN or now_min > END_MIN:
+        return
+
+    start = bucket(ts)
+    c = candles.get(symbol)
+
+    if not c or c["start"] != start:
+        if c:
+            push_candle(symbol, c)
+
+        candles[symbol] = {
+            "start": start,
+            "open": ltp,
+            "high": ltp,
+            "low": ltp,
+            "close": ltp,
+            "cum_vol": cum_vol
+        }
+    else:
+        c["high"] = max(c["high"], ltp)
+        c["low"] = min(c["low"], ltp)
+        c["close"] = ltp
+        c["cum_vol"] = cum_vol
+
+def onerror(err):
+    print("WS ERROR:", err)
+
+def onclose(msg):
+    print("WS CLOSED:", msg)
+
+def onopen():
+    print("✅ WS OPEN – subscribing universe")
+    ws.subscribe(symbols=SYMBOLS, data_type="SymbolUpdate")
+
+# ===================== WS START =====================
+def start_ws():
+    global ws
+    ws = data_ws.FyersWebsocket(
+        access_token=FYERS_ACCESS_TOKEN,
+        onmessage=onmessage,
+        onerror=onerror,
+        onclose=onclose,
+        reconnect=True
+    )
+    ws.connect()
+    ws.keep_running()
+
+# ===================== MAIN =====================
+if __name__ == "__main__":
+    SYMBOLS.extend(load_universe())
+
+    if not SYMBOLS:
+        raise RuntimeError("Universe empty – aborting startup")
+
+    threading.Thread(target=start_ws, daemon=True).start()
+    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 8080)))
