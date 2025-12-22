@@ -1,20 +1,19 @@
 # ============================================================
-# RajanTradeAutomation – main.py (FINAL STABLE)
-# Tick → 5m Candle → Batch Push → Bias Engine
+# RajanTradeAutomation – main.py (FINAL + STRATEGY READY)
+# Tick → 5m Candle → Batch Push → Bias → Signal Engine
 # ============================================================
 
 import os
 import time
-import json
 import threading
 import requests
 from datetime import datetime
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify
 from fyers_apiv3.FyersWebsocket import data_ws
 
-# ------------------------------------------------------------
-# ENV (Render)
-# ------------------------------------------------------------
+# ============================================================
+# ENV (Render) – DO NOT TOUCH
+# ============================================================
 WEBAPP_URL = os.getenv("WEBAPP_URL")
 FYERS_CLIENT_ID = os.getenv("FYERS_CLIENT_ID")
 FYERS_ACCESS_TOKEN = os.getenv("FYERS_ACCESS_TOKEN")
@@ -22,59 +21,66 @@ FYERS_ACCESS_TOKEN = os.getenv("FYERS_ACCESS_TOKEN")
 if not WEBAPP_URL or not FYERS_ACCESS_TOKEN:
     raise Exception("Missing ENV variables")
 
-# ------------------------------------------------------------
-# TODAY TEST TIMINGS
-# ------------------------------------------------------------
+# ============================================================
+# TIMINGS (TEST – Editable later via Settings)
+# ============================================================
 TICK_START = "15:05:00"
 BIAS_TIME  = "15:15:05"
 STOP_TIME  = "15:30:00"
 CANDLE_SEC = 300
 
-# ------------------------------------------------------------
+# ============================================================
+# IMPORT STRATEGY MODULES (ADD ONLY)
+# ============================================================
+from signal_engine import on_new_candle
+
+# ============================================================
 # SYMBOL LIST (FULL – DO NOT TRIM)
-# ------------------------------------------------------------
+# ============================================================
 SYMBOLS = [
-    # AUTO
     "NSE:EICHERMOT-EQ","NSE:SONACOMS-EQ","NSE:TVSMOTOR-EQ","NSE:MARUTI-EQ",
     "NSE:TMPV-EQ","NSE:M&M-EQ","NSE:MOTHERSON-EQ","NSE:TIINDIA-EQ",
     "NSE:BHARATFORG-EQ","NSE:BOSCHLTD-EQ","NSE:EXIDEIND-EQ","NSE:ASHOKLEY-EQ",
     "NSE:UNOMINDA-EQ","NSE:BAJAJ-AUTO-EQ","NSE:HEROMOTOCO-EQ",
 
-    # FIN
     "NSE:SHRIRAMFIN-EQ","NSE:SBIN-EQ","NSE:BSE-EQ","NSE:AXISBANK-EQ",
     "NSE:BAJFINANCE-EQ","NSE:PFC-EQ","NSE:LICHSGFIN-EQ","NSE:KOTAKBANK-EQ",
     "NSE:RECLTD-EQ","NSE:BAJAJFINSV-EQ","NSE:JIOFIN-EQ",
     "NSE:HDFCBANK-EQ","NSE:ICICIBANK-EQ","NSE:SBILIFE-EQ","NSE:HDFCLIFE-EQ",
 
-    # FMCG
     "NSE:ITC-EQ","NSE:HINDUNILVR-EQ","NSE:NESTLEIND-EQ","NSE:DABUR-EQ",
     "NSE:BRITANNIA-EQ","NSE:MARICO-EQ","NSE:TATACONSUM-EQ",
 
-    # IT
     "NSE:TCS-EQ","NSE:INFY-EQ","NSE:HCLTECH-EQ","NSE:TECHM-EQ",
     "NSE:LTIM-EQ","NSE:MPHASIS-EQ",
 
-    # METAL
     "NSE:TATASTEEL-EQ","NSE:JSWSTEEL-EQ","NSE:HINDALCO-EQ","NSE:VEDL-EQ",
 
-    # PHARMA
     "NSE:SUNPHARMA-EQ","NSE:DRREDDY-EQ","NSE:CIPLA-EQ","NSE:DIVISLAB-EQ",
 
-    # OIL
     "NSE:RELIANCE-EQ","NSE:ONGC-EQ","NSE:BPCL-EQ","NSE:IOC-EQ"
 ]
 
-# ------------------------------------------------------------
-# STATE BUFFERS
-# ------------------------------------------------------------
+# ============================================================
+# GLOBAL STATE
+# ============================================================
 tick_cache = {}
 candle_buf = {}
-last_day_vol = {}
+prev_cum_vol = {}          # ✔ FIXED: NOT last day, but prev candle
+candle_index = {}
 bias_done = False
+GLOBAL_BIAS = "NEUTRAL"
 
-# ------------------------------------------------------------
+# Future use (sector engine)
+SELECTED_STOCKS = set(SYMBOLS)
+
+SETTINGS_CACHE = {
+    "PER_TRADE_RISK": 500
+}
+
+# ============================================================
 # HELPERS
-# ------------------------------------------------------------
+# ============================================================
 def now_str():
     return datetime.now().strftime("%H:%M:%S")
 
@@ -93,9 +99,9 @@ def candle_direction(o, c):
     if c < o: return "RED"
     return "NEUTRAL"
 
-# ------------------------------------------------------------
-# 5 MIN CANDLE ENGINE
-# ------------------------------------------------------------
+# ============================================================
+# 5-MIN CANDLE ENGINE (FIXED VOLUME LOGIC)
+# ============================================================
 def handle_tick(symbol, ltp, vol, ts):
     bucket = ts - (ts % CANDLE_SEC)
 
@@ -108,7 +114,8 @@ def handle_tick(symbol, ltp, vol, ts):
             "close": ltp,
             "cum_vol": vol
         }
-        last_day_vol[symbol] = vol
+        prev_cum_vol[symbol] = vol
+        candle_index[symbol] = 0
         return
 
     c = candle_buf[symbol]
@@ -119,11 +126,13 @@ def handle_tick(symbol, ltp, vol, ts):
         c["close"] = ltp
         c["cum_vol"] = vol
     else:
-        # close candle
-        vol_diff = max(0, c["cum_vol"] - last_day_vol.get(symbol, 0))
-        last_day_vol[symbol] = c["cum_vol"]
+        # ---- CLOSE CANDLE ----
+        candle_index[symbol] += 1
 
-        row = {
+        vol_diff = max(0, c["cum_vol"] - prev_cum_vol.get(symbol, c["cum_vol"]))
+        prev_cum_vol[symbol] = c["cum_vol"]
+
+        candle_payload = {
             "symbol": symbol,
             "time": datetime.fromtimestamp(c["start"]).strftime("%Y-%m-%d %H:%M:%S"),
             "timeframe": "5",
@@ -132,14 +141,25 @@ def handle_tick(symbol, ltp, vol, ts):
             "low": c["low"],
             "close": c["close"],
             "volume": vol_diff,
-            "candle_index": 0,
-            "lowest_volume_so_far": 0,
-            "is_signal": False,
+            "index": candle_index[symbol],
             "direction": candle_direction(c["open"], c["close"])
         }
 
-        post_webapp("pushCandle", {"candles": [row]})
+        # Push to CandleHistory
+        post_webapp("pushCandle", {"candles": [candle_payload]})
 
+        # ---- SIGNAL ENGINE (ONLY SELECTED STOCKS) ----
+        if symbol in SELECTED_STOCKS:
+            signal = on_new_candle(
+                symbol=symbol,
+                candle=candle_payload,
+                bias=GLOBAL_BIAS,
+                settings=SETTINGS_CACHE
+            )
+            if signal:
+                post_webapp("pushSignal", {"signals": [signal]})
+
+        # Reset for next candle
         candle_buf[symbol] = {
             "start": bucket,
             "open": ltp,
@@ -149,10 +169,12 @@ def handle_tick(symbol, ltp, vol, ts):
             "cum_vol": vol
         }
 
-# ------------------------------------------------------------
-# BIAS LOGIC (REAL ADV / DEC)
-# ------------------------------------------------------------
+# ============================================================
+# BIAS LOGIC (UNCHANGED, STORED GLOBALLY)
+# ============================================================
 def run_bias():
+    global GLOBAL_BIAS
+
     adv = 0
     dec = 0
 
@@ -170,6 +192,8 @@ def run_bias():
         elif dec / total >= 0.6:
             bias = "BEARISH"
 
+    GLOBAL_BIAS = bias
+
     post_webapp("pushState", {
         "items": [
             {"key": "ADVANCES", "value": adv},
@@ -178,15 +202,14 @@ def run_bias():
         ]
     })
 
-# ------------------------------------------------------------
-# FYERS WS CALLBACK
-# ------------------------------------------------------------
+# ============================================================
+# FYERS WS CALLBACKS (UNCHANGED)
+# ============================================================
 def on_message(msg):
-    data = msg
-    sym = data.get("symbol")
-    ltp = data.get("ltp")
-    vol = data.get("vol_traded_today")
-    ts  = data.get("exch_feed_time")
+    sym = msg.get("symbol")
+    ltp = msg.get("ltp")
+    vol = msg.get("vol_traded_today")
+    ts  = msg.get("exch_feed_time")
 
     if not sym: return
 
@@ -198,12 +221,11 @@ def on_message(msg):
 def on_open():
     ws.subscribe(symbols=SYMBOLS, data_type="SymbolUpdate")
 
-# ------------------------------------------------------------
+# ============================================================
 # ENGINE LOOP
-# ------------------------------------------------------------
+# ============================================================
 def engine_loop():
     global bias_done
-
     while True:
         t = now_str()
 
@@ -216,9 +238,9 @@ def engine_loop():
 
         time.sleep(1)
 
-# ------------------------------------------------------------
+# ============================================================
 # START WS
-# ------------------------------------------------------------
+# ============================================================
 ws = data_ws.FyersDataSocket(
     access_token=FYERS_ACCESS_TOKEN,
     on_message=on_message,
@@ -226,18 +248,18 @@ ws = data_ws.FyersDataSocket(
     reconnect=True
 )
 
-# ------------------------------------------------------------
-# FLASK (KEEP ALIVE)
-# ------------------------------------------------------------
+# ============================================================
+# FLASK KEEP-ALIVE (LOCKED)
+# ============================================================
 app = Flask(__name__)
 
 @app.route("/")
 def home():
     return jsonify({"ok": True})
 
-# ------------------------------------------------------------
+# ============================================================
 # MAIN
-# ------------------------------------------------------------
+# ============================================================
 if __name__ == "__main__":
     threading.Thread(target=ws.connect, daemon=True).start()
     threading.Thread(target=engine_loop, daemon=True).start()
