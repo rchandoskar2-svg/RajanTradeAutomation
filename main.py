@@ -1,6 +1,6 @@
 # ============================================================
-# RajanTradeAutomation – main.py (FINAL + STRATEGY READY)
-# Tick → 5m Candle → Batch Push → Bias → Signal Engine
+# RajanTradeAutomation – main.py (FINAL – CORRECTED)
+# Tick → 5m Candle → Sector Mapping → Signal Engine
 # ============================================================
 
 import os
@@ -22,16 +22,18 @@ if not WEBAPP_URL or not FYERS_ACCESS_TOKEN:
     raise Exception("Missing ENV variables")
 
 # ============================================================
-# TIMINGS (TEST – Editable later via Settings)
+# TIME CONFIG (LOCKED – STRATEGY)
 # ============================================================
-TICK_START = "15:05:00"
-BIAS_TIME  = "15:15:05"
-STOP_TIME  = "15:30:00"
-CANDLE_SEC = 300
+TICK_START = "09:14:00"     # silent tick window
+BIAS_TIME  = "09:25:05"     # sector snapshot
+STOP_TIME  = "15:30:00"     # hard stop
+CANDLE_SEC = 300            # 5-minute candles
 
 # ============================================================
-# IMPORT STRATEGY MODULES (ADD ONLY)
+# IMPORT STRATEGY MODULES (ALREADY PROVIDED)
 # ============================================================
+from sector_mapping import SECTOR_MAP
+from sector_engine import maybe_run_sector_decision, get_bias
 from signal_engine import on_new_candle
 
 # ============================================================
@@ -66,24 +68,26 @@ SYMBOLS = [
 # ============================================================
 tick_cache = {}
 candle_buf = {}
-prev_cum_vol = {}          # ✔ FIXED: NOT last day, but prev candle
+prev_cum_vol = {}
 candle_index = {}
-bias_done = False
-GLOBAL_BIAS = "NEUTRAL"
 
-# Future use (sector engine)
-SELECTED_STOCKS = set(SYMBOLS)
+day_open_price = {}
+pct_change_map = {}
 
-SETTINGS_CACHE = {
+SELECTED_STOCKS = set()
+
+SETTINGS = {
+    "THRESHOLD": 80,
+    "MAX_UP": 2.5,
+    "MAX_DN": 2.5,
+    "BUY_SECTORS": 2,
+    "SELL_SECTORS": 2,
     "PER_TRADE_RISK": 500
 }
 
 # ============================================================
 # HELPERS
 # ============================================================
-def now_str():
-    return datetime.now().strftime("%H:%M:%S")
-
 def post_webapp(action, payload):
     try:
         requests.post(
@@ -100,7 +104,15 @@ def candle_direction(o, c):
     return "NEUTRAL"
 
 # ============================================================
-# 5-MIN CANDLE ENGINE (FIXED VOLUME LOGIC)
+# PHASE-B ACTIVATION
+# ============================================================
+def activate_phase_b(symbols):
+    global SELECTED_STOCKS
+    SELECTED_STOCKS = set(symbols)
+    print("PHASE-B ACTIVE | SELECTED STOCKS:", len(SELECTED_STOCKS))
+
+# ============================================================
+# 5-MIN CANDLE ENGINE (CORRECT VOLUME LOGIC)
 # ============================================================
 def handle_tick(symbol, ltp, vol, ts):
     bucket = ts - (ts % CANDLE_SEC)
@@ -126,13 +138,12 @@ def handle_tick(symbol, ltp, vol, ts):
         c["close"] = ltp
         c["cum_vol"] = vol
     else:
-        # ---- CLOSE CANDLE ----
         candle_index[symbol] += 1
 
         vol_diff = max(0, c["cum_vol"] - prev_cum_vol.get(symbol, c["cum_vol"]))
         prev_cum_vol[symbol] = c["cum_vol"]
 
-        candle_payload = {
+        candle = {
             "symbol": symbol,
             "time": datetime.fromtimestamp(c["start"]).strftime("%Y-%m-%d %H:%M:%S"),
             "timeframe": "5",
@@ -145,21 +156,14 @@ def handle_tick(symbol, ltp, vol, ts):
             "direction": candle_direction(c["open"], c["close"])
         }
 
-        # Push to CandleHistory
-        post_webapp("pushCandle", {"candles": [candle_payload]})
+        post_webapp("pushCandle", {"candles": [candle]})
 
-        # ---- SIGNAL ENGINE (ONLY SELECTED STOCKS) ----
         if symbol in SELECTED_STOCKS:
-            signal = on_new_candle(
-                symbol=symbol,
-                candle=candle_payload,
-                bias=GLOBAL_BIAS,
-                settings=SETTINGS_CACHE
-            )
+            bias = get_bias(symbol)
+            signal = on_new_candle(symbol, candle, bias, SETTINGS)
             if signal:
                 post_webapp("pushSignal", {"signals": [signal]})
 
-        # Reset for next candle
         candle_buf[symbol] = {
             "start": bucket,
             "open": ltp,
@@ -170,40 +174,7 @@ def handle_tick(symbol, ltp, vol, ts):
         }
 
 # ============================================================
-# BIAS LOGIC (UNCHANGED, STORED GLOBALLY)
-# ============================================================
-def run_bias():
-    global GLOBAL_BIAS
-
-    adv = 0
-    dec = 0
-
-    for s, t in tick_cache.items():
-        if t["ltp"] >= t["prev"]:
-            adv += 1
-        else:
-            dec += 1
-
-    bias = "NEUTRAL"
-    total = adv + dec
-    if total > 0:
-        if adv / total >= 0.6:
-            bias = "BULLISH"
-        elif dec / total >= 0.6:
-            bias = "BEARISH"
-
-    GLOBAL_BIAS = bias
-
-    post_webapp("pushState", {
-        "items": [
-            {"key": "ADVANCES", "value": adv},
-            {"key": "DECLINES", "value": dec},
-            {"key": "BIAS", "value": bias}
-        ]
-    })
-
-# ============================================================
-# FYERS WS CALLBACKS (UNCHANGED)
+# FYERS WS CALLBACK
 # ============================================================
 def on_message(msg):
     sym = msg.get("symbol")
@@ -211,10 +182,15 @@ def on_message(msg):
     vol = msg.get("vol_traded_today")
     ts  = msg.get("exch_feed_time")
 
-    if not sym: return
+    if not sym:
+        return
 
-    prev = tick_cache.get(sym, {}).get("ltp", ltp)
-    tick_cache[sym] = {"ltp": ltp, "prev": prev}
+    if sym not in day_open_price:
+        day_open_price[sym] = ltp
+
+    pct_change_map[sym] = ((ltp - day_open_price[sym]) / day_open_price[sym]) * 100
+
+    tick_cache[sym] = {"ltp": ltp}
 
     handle_tick(sym, ltp, vol, ts)
 
@@ -225,15 +201,23 @@ def on_open():
 # ENGINE LOOP
 # ============================================================
 def engine_loop():
-    global bias_done
     while True:
-        t = now_str()
+        now = datetime.now()
 
-        if t >= BIAS_TIME and not bias_done:
-            run_bias()
-            bias_done = True
+        maybe_run_sector_decision(
+            now=now,
+            pct_change_map=pct_change_map,
+            bias_time=BIAS_TIME,
+            threshold=SETTINGS["THRESHOLD"],
+            max_up=SETTINGS["MAX_UP"],
+            max_dn=SETTINGS["MAX_DN"],
+            buy_sector_count=SETTINGS["BUY_SECTORS"],
+            sell_sector_count=SETTINGS["SELL_SECTORS"],
+            sector_map=SECTOR_MAP,
+            phase_b_switch=activate_phase_b
+        )
 
-        if t >= STOP_TIME:
+        if now.strftime("%H:%M:%S") >= STOP_TIME:
             break
 
         time.sleep(1)
