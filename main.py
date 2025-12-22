@@ -2,41 +2,38 @@
 # RajanTradeAutomation – main.py (Render Stable WS Version)
 # FIXED: setuptools<81, FYERS WS, Render-safe threading
 # + FYERS CALLBACK URI ROUTE
-# + LOCAL-PROVEN 5-MIN CANDLE BUILD (CUM VOL BASED)
-# + FYERS-REDIRECT ROUTE (ADDED)
-# + GOOGLE SHEET PUSH CANDLE (ADDED)
+# + FYERS-REDIRECT ROUTE
+# + LOCAL-PROVEN 5-MIN CANDLE ENGINE
+# + GOOGLE SHEET PUSH CANDLE (ENV-BASED)
 # ============================================================
 
 import os
 import time
 import threading
-from datetime import datetime
 from flask import Flask, jsonify, request
-import requests   # ⭐ Needed for push
+import requests
 
 print("🚀 main.py STARTED")
 
+
 # ------------------------------------------------------------
-# ENV CHECK
+# ENV VARIABLES
 # ------------------------------------------------------------
 FYERS_CLIENT_ID = os.getenv("FYERS_CLIENT_ID")
 FYERS_ACCESS_TOKEN = os.getenv("FYERS_ACCESS_TOKEN")
+WEBAPP_URL = os.getenv("WEBAPP_URL")        # ⭐ READ FROM ENV (CORRECT WAY)
 
 print("🔍 ENV CHECK")
 print("FYERS_CLIENT_ID =", FYERS_CLIENT_ID)
+print("WEBAPP_URL =", WEBAPP_URL)
 print("FYERS_ACCESS_TOKEN prefix =", FYERS_ACCESS_TOKEN[:20] if FYERS_ACCESS_TOKEN else "❌ MISSING")
 
-if not FYERS_CLIENT_ID or not FYERS_ACCESS_TOKEN:
-    raise Exception("❌ FYERS ENV variables missing")
-
-# ------------------------------------------------------------
-# Google Sheet WebApp URL  ⭐ (ADDED YOUR EXEC)
-# ------------------------------------------------------------
-WEBAPP_URL = "https://script.google.com/macros/s/AKfycbwSDiqsEQW5BI8RuPScSq3VUmPxG7KlFGeDWk5_VK8LqTBe3hMgehJEgCK7Uu1xkE0-/exec"
+if not FYERS_CLIENT_ID or not FYERS_ACCESS_TOKEN or not WEBAPP_URL:
+    raise Exception("❌ ENV Missing: FYERS_CLIENT_ID / FYERS_ACCESS_TOKEN / WEBAPP_URL")
 
 
 # ------------------------------------------------------------
-# Flask App Base
+# Flask application
 # ------------------------------------------------------------
 app = Flask(__name__)
 
@@ -44,8 +41,9 @@ app = Flask(__name__)
 def health():
     return jsonify({"status": "ok", "service": "RajanTradeAutomation"})
 
+
 # ------------------------------------------------------------
-# FYERS CALLBACK (Original)
+# FYERS CALLBACK
 # ------------------------------------------------------------
 @app.route("/callback")
 def fyers_callback():
@@ -55,8 +53,9 @@ def fyers_callback():
         return jsonify({"error": "auth_code missing"}), 400
     return jsonify({"status": "callback_received", "auth_code": auth_code})
 
+
 # ------------------------------------------------------------
-# FYERS REDIRECT (Custom)
+# FYERS REDIRECT (Your Custom Route)
 # ------------------------------------------------------------
 @app.route("/fyers-redirect")
 def fyers_redirect():
@@ -65,6 +64,7 @@ def fyers_redirect():
         print("🔑 FYERS REDIRECT HIT:", auth_code)
         if not auth_code:
             return jsonify({"error": "auth_code missing"}), 400
+
         return jsonify({"status": "redirect_received", "auth_code": auth_code})
     except Exception as e:
         print("🔥 Redirect error:", e)
@@ -75,10 +75,11 @@ def fyers_redirect():
 # FYERS WebSocket
 # ------------------------------------------------------------
 from fyers_apiv3.FyersWebsocket import data_ws
-print("✅ data_ws IMPORT SUCCESS")
+print("✅ WebSocket Import successful")
+
 
 # ------------------------------------------------------------
-# Push Candle to Google Sheet  ⭐⭐⭐
+# SEND CANDLE → GOOGLE SHEET (ENV-based)
 # ------------------------------------------------------------
 def push_to_webapp(symbol, c, candle_volume):
     try:
@@ -98,7 +99,8 @@ def push_to_webapp(symbol, c, candle_volume):
             }
         }
         r = requests.post(WEBAPP_URL, json=payload, timeout=4)
-        print("📤 PUSH → WebApp:", r.text)
+        print("📤 PUSH RESULT:", r.text)
+
     except Exception as e:
         print("🔥 PUSH ERROR:", e)
 
@@ -107,25 +109,24 @@ def push_to_webapp(symbol, c, candle_volume):
 # 5-MIN CANDLE ENGINE
 # ------------------------------------------------------------
 CANDLE_INTERVAL = 300
-
 candles = {}
 last_candle_vol = {}
 
 def get_candle_start(ts):
     return ts - (ts % CANDLE_INTERVAL)
 
+
 def close_candle(symbol, c):
     prev_vol = last_candle_vol.get(symbol, c["cum_vol"])
     candle_volume = c["cum_vol"] - prev_vol
     last_candle_vol[symbol] = c["cum_vol"]
 
-    # ⭐⭐⭐ PUSH TO GOOGLE SHEET
     push_to_webapp(symbol, c, candle_volume)
 
     print(f"\n🟩 5m CANDLE {symbol}")
-    print(f"Time: {time.strftime('%H:%M:%S', time.localtime(c['start']))}")
     print(f"O:{c['open']} H:{c['high']} L:{c['low']} C:{c['close']} V:{candle_volume}")
     print("---------------------------")
+
 
 def update_candle_from_tick(msg):
     if not isinstance(msg, dict):
@@ -157,13 +158,13 @@ def update_candle_from_tick(msg):
         return
 
     c["high"] = max(c["high"], ltp)
-    c["low"]  = min(c["low"], ltp)
+    c["low"] = min(c["low"], ltp)
     c["close"] = ltp
     c["cum_vol"] = vol
 
 
 # ------------------------------------------------------------
-# WebSocket Callbacks
+# WS CALLBACKS
 # ------------------------------------------------------------
 def on_message(message):
     print("📩 WS:", message)
@@ -181,9 +182,9 @@ def on_close(message):
 def on_connect():
     print("🔗 WS CONNECTED")
 
-    # --------------------------------------------------------
-    # ⭐ ALL 160–170 SYMBOLS EXACTLY AS YOU PROVIDED
-    # --------------------------------------------------------
+    # -----------------------------------------------
+    # ⭐ ALL 160–170 stocks (Your full Universe)
+    # -----------------------------------------------
     symbols = [
         "NSE:EICHERMOT-EQ","NSE:SONACOMS-EQ","NSE:TVSMOTOR-EQ","NSE:MARUTI-EQ",
         "NSE:TMPV-EQ","NSE:M&M-EQ","NSE:MOTHERSON-EQ","NSE:TIINDIA-EQ",
@@ -203,7 +204,7 @@ def on_connect():
         "NSE:VBL-EQ","NSE:UNITDSPR-EQ","NSE:RADICO-EQ","NSE:COLPAL-EQ",
 
         "NSE:WIPRO-EQ","NSE:INFY-EQ","NSE:TCS-EQ","NSE:PERSISTENT-EQ",
-        "NSE:LTIM-EQ","NSE:MPHASIS-E-EQ","NSE:HCLTECH-EQ","NSE:TECHM-EQ",
+        "NSE:LTIM-EQ","NSE:MPHASIS-EQ","NSE:HCLTECH-EQ","NSE:TECHM-EQ",
         "NSE:COFORGE-EQ","NSE:OFSS-EQ",
 
         "NSE:ZEEL-EQ","NSE:PVRINOX-EQ","NSE:DBCORP-EQ","NSE:HATHWAY-EQ",
@@ -241,11 +242,12 @@ def on_connect():
         "NSE:NAVINFLUOR-EQ","NSE:COROMANDEL-EQ"
     ]
 
-    print(f"📡 Subscribing TOTAL symbols: {len(symbols)}")
+    print(f"📡 Subscribing to {len(symbols)} symbols…")
     fyers_ws.subscribe(symbols=symbols, data_type="SymbolUpdate")
 
+
 # ------------------------------------------------------------
-# Start WS
+# WS THREAD
 # ------------------------------------------------------------
 def start_ws():
     global fyers_ws
@@ -259,12 +261,14 @@ def start_ws():
     )
     fyers_ws.connect()
 
+
 threading.Thread(target=start_ws, daemon=True).start()
 
+
 # ------------------------------------------------------------
-# Start Flask
+# START FLASK
 # ------------------------------------------------------------
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
-    print(f"🌐 Starting Flask on port {port}")
+    print("🌐 Flask starting on port", port)
     app.run(host="0.0.0.0", port=port)
