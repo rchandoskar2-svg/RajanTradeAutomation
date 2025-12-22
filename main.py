@@ -3,6 +3,7 @@
 # FIXED: setuptools<81, FYERS WS, Render-safe threading
 # + FYERS CALLBACK URI ROUTE
 # + LOCAL-PROVEN 5-MIN CANDLE BUILD (CUM VOL BASED)
+# + FYERS-REDIRECT ROUTE (ADDED)
 # ============================================================
 
 import os
@@ -41,7 +42,9 @@ def health():
         "service": "RajanTradeAutomation"
     })
 
-# REQUIRED FOR FYERS AUTH FLOW
+# ------------------------------------------------------------
+# DEFAULT FYERS CALLBACK ROUTE
+# ------------------------------------------------------------
 @app.route("/callback")
 def fyers_callback():
     auth_code = request.args.get("auth_code")
@@ -54,6 +57,28 @@ def fyers_callback():
         "status": "callback_received",
         "auth_code": auth_code
     })
+
+# ------------------------------------------------------------
+# CUSTOM FYERS-REDIRECT ROUTE (ADDED NOW)
+# ------------------------------------------------------------
+@app.route("/fyers-redirect")
+def fyers_redirect():
+    try:
+        auth_code = request.args.get("auth_code")
+        print("🔑 FYERS REDIRECT HIT | AUTH CODE =", auth_code)
+
+        if not auth_code:
+            return jsonify({"error": "auth_code missing"}), 400
+
+        return jsonify({
+            "status": "redirect_received",
+            "auth_code": auth_code
+        })
+
+    except Exception as e:
+        print("🔥 Redirect error:", e)
+        return jsonify({"error": str(e)}), 500
+
 
 # ------------------------------------------------------------
 # FYERS WebSocket
