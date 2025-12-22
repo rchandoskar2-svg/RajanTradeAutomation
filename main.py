@@ -1,337 +1,289 @@
 # ============================================================
-# RajanTradeAutomation - Main Backend (Render / Flask)
-# Version: 3.0 (Live Strategy + Test Suite)
-# Role:
-#   - Bridge between Fyers/NSE data & Google Sheets (WebApp.gs)
-#   - Expose simple HTTP routes for health, settings & testing
+# RajanTradeAutomation – main.py (Render Stable WS Version)
+# FIXED: setuptools<81, FYERS WS, Render-safe threading
+# FYERS CALLBACK URI + FYERS-REDIRECT
+# LOCAL-PROVEN 5-MIN CANDLE ENGINE
+# GOOGLE SHEET PUSH CANDLE
+# NOISE-FREE (Ticks NOT printed)
 # ============================================================
 
-from flask import Flask, request, jsonify
-import requests
 import os
+import time
+import threading
+from datetime import datetime
+from flask import Flask, jsonify, request
+import requests   # needed for push
 
+print("🚀 main.py STARTED")
+
+# ------------------------------------------------------------
+# ENV CHECK
+# ------------------------------------------------------------
+FYERS_CLIENT_ID = os.getenv("FYERS_CLIENT_ID")
+FYERS_ACCESS_TOKEN = os.getenv("FYERS_ACCESS_TOKEN")
+WEBAPP_URL = os.getenv("WEBAPP_URL")  # ⭐ NOW READ FROM ENV
+
+print("🔍 ENV CHECK")
+print("FYERS_CLIENT_ID =", FYERS_CLIENT_ID)
+print("FYERS_ACCESS_TOKEN prefix =", FYERS_ACCESS_TOKEN[:20] if FYERS_ACCESS_TOKEN else "❌ MISSING")
+print("WEBAPP_URL =", WEBAPP_URL)
+
+if not FYERS_CLIENT_ID or not FYERS_ACCESS_TOKEN:
+    raise Exception("❌ FYERS ENV variables missing")
+
+if not WEBAPP_URL:
+    raise Exception("❌ WEBAPP_URL missing in environment")
+
+
+# ------------------------------------------------------------
+# Flask App Base
+# ------------------------------------------------------------
 app = Flask(__name__)
 
-# ------------------------------------------------------------
-# ENVIRONMENT VARIABLES  (set in Render → Environment)
-# ------------------------------------------------------------
-WEBAPP_URL = os.getenv("WEBAPP_URL", "").strip()
-
-FYERS_CLIENT_ID = os.getenv("FYERS_CLIENT_ID", "").strip()
-FYERS_SECRET_KEY = os.getenv("FYERS_SECRET_KEY", "").strip()
-FYERS_REDIRECT_URI = os.getenv("FYERS_REDIRECT_URI", "").strip()
-FYERS_ACCESS_TOKEN = os.getenv("FYERS_ACCESS_TOKEN", "").strip()
+@app.route("/")
+def health():
+    return jsonify({"status": "ok", "service": "RajanTradeAutomation"})
 
 
 # ------------------------------------------------------------
-# SMALL HELPERS
+# FYERS CALLBACK (Original)
 # ------------------------------------------------------------
-def call_webapp(action, payload=None, timeout=15):
-    """
-    Generic helper to send JSON to Google Apps Script WebApp.gs
+@app.route("/callback")
+def fyers_callback():
+    auth_code = request.args.get("auth_code")
+    print("🔑 FYERS CALLBACK HIT:", auth_code)
+    if not auth_code:
+        return jsonify({"error": "auth_code missing"}), 400
 
-    request body:
-    {
-      "action": "<string>",
-      "payload": {...}
-    }
-    """
-    if payload is None:
-        payload = {}
-
-    if not WEBAPP_URL:
-        return {"ok": False, "error": "WEBAPP_URL not configured in env"}
-
-    body = {"action": action, "payload": payload}
-
-    try:
-        res = requests.post(WEBAPP_URL, json=body, timeout=timeout)
-        txt = res.text
-        # Try to parse JSON if possible, else return raw text
-        try:
-            j = res.json()
-            return j
-        except Exception:
-            return {"ok": True, "raw": txt}
-    except Exception as e:
-        return {"ok": False, "error": str(e)}
+    return jsonify({"status": "callback_received", "auth_code": auth_code})
 
 
 # ------------------------------------------------------------
-# ROOT + HEALTH CHECK
+# FYERS REDIRECT (Custom)
 # ------------------------------------------------------------
-@app.route("/", methods=["GET"])
-def root():
-    return "RajanTradeAutomation backend is LIVE ✅", 200
-
-
-@app.route("/ping", methods=["GET"])
-def ping():
-    return "PONG", 200
-
-
-# ------------------------------------------------------------
-# SETTINGS FETCH (Render → WebApp → Sheets)
-# ------------------------------------------------------------
-@app.route("/getSettings", methods=["GET"])
-def get_settings():
-    """
-    Calls WebApp.gs with action=getSettings
-    and returns settings JSON directly to browser.
-    """
-    result = call_webapp("getSettings", {})
-    return jsonify(result)
-
-
-# ------------------------------------------------------------
-# FYERS OAUTH REDIRECT HANDLER
-# (Used only when generating fresh auth code)
-# ------------------------------------------------------------
-@app.route("/fyers-redirect", methods=["GET"])
+@app.route("/fyers-redirect")
 def fyers_redirect():
-    """
-    Fyers will redirect to this URL with params:
-      ?s=ok&auth_code=xxxxx&state=....
-    We simply display the auth_code on screen so Rajan
-    can copy it and use it to generate access_token.
-    """
-    status = request.args.get("s") or request.args.get("status", "")
-    auth_code = request.args.get("auth_code", "")
-    state = request.args.get("state", "")
+    try:
+        auth_code = request.args.get("auth_code")
+        print("🔑 FYERS REDIRECT HIT:", auth_code)
 
-    html = f"""
-    <h2>Fyers Redirect Handler</h2>
-    <p>Status: <b>{status}</b></p>
-    <p>State: <b>{state}</b></p>
-    <p><b>Auth Code (copy & save safely):</b></p>
-    <textarea rows="5" cols="120">{auth_code}</textarea>
-    <p>हा code कुणालाही share करू नकोस. Render env मधील
-    FYERS_ACCESS_TOKEN तयार करताना याचा वापर कर.</p>
-    """
-    return html, 200
+        if not auth_code:
+            return jsonify({"error": "auth_code missing"}), 400
+
+        return jsonify({"status": "redirect_received", "auth_code": auth_code})
+
+    except Exception as e:
+        print("🔥 Redirect error:", e)
+        return jsonify({"error": str(e)}), 500
 
 
 # ------------------------------------------------------------
-# =============  TEST SUITE (no real trades)  ================
-# सर्व खालील routes फक्त TEST साठी आहेत.
-# हे browser मधून hit केल्यावर WebApp.gs ला dummy data
-# जाईल व Sheets मध्ये rows दिसतील.
+# FYERS WebSocket
 # ------------------------------------------------------------
-
-# ---------- 1) UNIVERSE TEST ----------
-@app.route("/test/syncUniverse", methods=["GET"])
-def test_sync_universe():
-    payload = {
-        "universe": [
-            {
-                "symbol": "NSE:SBIN-EQ",
-                "name": "State Bank of India",
-                "sector": "PSU BANK",
-                "is_fno": True,
-                "enabled": True
-            },
-            {
-                "symbol": "NSE:TCS-EQ",
-                "name": "TCS",
-                "sector": "IT",
-                "is_fno": True,
-                "enabled": True
-            },
-            {
-                "symbol": "NSE:RELIANCE-EQ",
-                "name": "Reliance Industries",
-                "sector": "OIL & GAS",
-                "is_fno": True,
-                "enabled": True
-            }
-        ]
-    }
-
-    result = call_webapp("syncUniverse", payload)
-    return jsonify(result)
-
-
-# ---------- 2) SECTOR PERFORMANCE TEST ----------
-# दोन्ही aliases देतो जेणेकरून गोंधळ नको:
-#   /test/updateSectorPerf  आणि /test/sectorPerf
-@app.route("/test/updateSectorPerf", methods=["GET"])
-@app.route("/test/sectorPerf", methods=["GET"])
-def test_update_sector_perf():
-    payload = {
-        "sectors": [
-            {
-                "sector_name": "PSU BANK",
-                "sector_code": "PSUBANK",
-                "%chg": 1.02,
-                "advances": 9,
-                "declines": 3
-            },
-            {
-                "sector_name": "NIFTY OIL & GAS",
-                "sector_code": "OILGAS",
-                "%chg": 0.20,
-                "advances": 7,
-                "declines": 5
-            },
-            {
-                "sector_name": "AUTOMOBILE",
-                "sector_code": "AUTO",
-                "%chg": -0.12,
-                "advances": 5,
-                "declines": 7
-            },
-            {
-                "sector_name": "FINANCIAL SERVICES",
-                "sector_code": "FIN",
-                "%chg": -0.77,
-                "advances": 3,
-                "declines": 11
-            }
-        ]
-    }
-
-    result = call_webapp("updateSectorPerf", payload)
-    return jsonify(result)
-
-
-# ---------- 3) STOCK LIST TEST ----------
-# aliases: /test/updateStockList  आणि /test/stocks
-@app.route("/test/updateStockList", methods=["GET"])
-@app.route("/test/stocks", methods=["GET"])
-def test_update_stock_list():
-    payload = {
-        "stocks": [
-            {
-                "symbol": "NSE:SBIN-EQ",
-                "direction_bias": "BUY",
-                "sector": "PSU BANK",
-                "%chg": 1.25,
-                "ltp": 622.40,
-                "volume": 1250000,
-                "selected": True
-            },
-            {
-                "symbol": "NSE:TCS-EQ",
-                "direction_bias": "SELL",
-                "sector": "IT",
-                "%chg": -1.15,
-                "ltp": 3455.80,
-                "volume": 820000,
-                "selected": True
-            },
-            {
-                "symbol": "NSE:RELIANCE-EQ",
-                "direction_bias": "BUY",
-                "sector": "OIL & GAS",
-                "%chg": 0.55,
-                "ltp": 2501.25,
-                "volume": 1520000,
-                "selected": False
-            }
-        ]
-    }
-
-    result = call_webapp("updateStockList", payload)
-    return jsonify(result)
-
-
-# ---------- 4) CANDLE HISTORY TEST ----------
-# aliases: /test/pushCandle आणि /test/candles
-@app.route("/test/pushCandle", methods=["GET"])
-@app.route("/test/candles", methods=["GET"])
-def test_push_candle():
-    payload = {
-        "candles": [
-            {
-                "symbol": "NSE:SBIN-EQ",
-                "time": "2025-12-05T09:35:00+05:30",  # 4th 5m candle close
-                "timeframe": "5m",
-                "open": 621.00,
-                "high": 623.00,
-                "low": 620.50,
-                "close": 622.40,
-                "volume": 155000,
-                "candle_index": 4,
-                "lowest_volume_so_far": 155000,
-                "is_signal": False,
-                "direction": "BUY"
-            }
-        ]
-    }
-
-    result = call_webapp("pushCandle", payload)
-    return jsonify(result)
-
-
-# ---------- 5) SIGNAL TEST ----------
-@app.route("/test/pushSignal", methods=["GET"])
-@app.route("/test/signal", methods=["GET"])
-def test_push_signal():
-    payload = {
-        "signals": [
-            {
-                "symbol": "NSE:SBIN-EQ",
-                "direction": "BUY",
-                "signal_time": "2025-12-05T09:36:00+05:30",
-                "candle_index": 4,
-                "open": 621.00,
-                "high": 623.00,
-                "low": 620.50,
-                "close": 622.40,
-                "entry_price": 623.00,
-                "sl": 620.50,
-                "target_price": 628.00,
-                "risk_per_share": 2.50,
-                "rr": 2.0,
-                "status": "PENDING"
-            }
-        ]
-    }
-
-    result = call_webapp("pushSignal", payload)
-    return jsonify(result)
-
-
-# ---------- 6) TRADE ENTRY TEST ----------
-@app.route("/test/pushTradeEntry", methods=["GET"])
-@app.route("/test/entry", methods=["GET"])
-def test_push_trade_entry():
-    payload = {
-        "symbol": "NSE:SBIN-EQ",
-        "direction": "BUY",
-        "entry_price": 623.00,
-        "sl": 620.50,
-        "target_price": 628.00,
-        "qty_total": 100,
-        "entry_time": "2025-12-05T09:37:10+05:30"
-    }
-
-    result = call_webapp("pushTradeEntry", payload)
-    return jsonify(result)
-
-
-# ---------- 7) TRADE EXIT TEST ----------
-@app.route("/test/pushTradeExit", methods=["GET"])
-@app.route("/test/exit", methods=["GET"])
-def test_push_trade_exit():
-    payload = {
-        "symbol": "NSE:SBIN-EQ",
-        "exit_type": "PARTIAL",       # SL / PARTIAL / FINAL / FORCE
-        "exit_qty": 50,
-        "exit_price": 625.50,
-        "exit_time": "2025-12-05T10:10:00+05:30",
-        "pnl": 1250.00,
-        "status": "PARTIAL"
-    }
-
-    result = call_webapp("pushTradeExit", payload)
-    return jsonify(result)
+from fyers_apiv3.FyersWebsocket import data_ws
+print("✅ data_ws IMPORT SUCCESS")
 
 
 # ------------------------------------------------------------
-# FLASK ENTRY POINT (Render uses this to start app)
+# Push Candle to Google Sheet  ⭐⭐⭐
+# ------------------------------------------------------------
+def push_to_webapp(symbol, c, candle_volume):
+    try:
+        payload = {
+            "action": "pushCandle",
+            "payload": {
+                "candles": [{
+                    "symbol": symbol,
+                    "time": c["start"],
+                    "timeframe": "5",
+                    "open": c["open"],
+                    "high": c["high"],
+                    "low": c["low"],
+                    "close": c["close"],
+                    "volume": candle_volume
+                }]
+            }
+        }
+
+        r = requests.post(WEBAPP_URL, json=payload, timeout=6)
+        print("📤 PUSH → WebApp:", r.text)
+
+    except Exception as e:
+        print("🔥 PUSH ERROR:", e)
+
+
+# ------------------------------------------------------------
+# 5-MIN CANDLE ENGINE
+# ------------------------------------------------------------
+CANDLE_INTERVAL = 300
+
+candles = {}
+last_candle_vol = {}
+
+def get_candle_start(ts):
+    return ts - (ts % CANDLE_INTERVAL)
+
+
+def close_candle(symbol, c):
+    prev_vol = last_candle_vol.get(symbol, c["cum_vol"])
+    candle_volume = c["cum_vol"] - prev_vol
+    last_candle_vol[symbol] = c["cum_vol"]
+
+    # ⭐ PUSH TO GOOGLE SHEET
+    push_to_webapp(symbol, c, candle_volume)
+
+    # ⭐ Only candle logs → NO noise
+    print(f"\n🟩 5m CANDLE {symbol}")
+    print(f"Time: {time.strftime('%H:%M:%S', time.localtime(c['start']))}")
+    print(f"O:{c['open']} H:{c['high']} L:{c['low']} C:{c['close']} V:{candle_volume}")
+    print("--------------------------------------------------")
+
+
+def update_candle_from_tick(msg):
+    if not isinstance(msg, dict):
+        return
+
+    symbol = msg.get("symbol")
+    ltp = msg.get("ltp")
+    vol = msg.get("vol_traded_today")
+    ts = msg.get("exch_feed_time")
+
+    if not symbol or ltp is None or vol is None or ts is None:
+        return
+
+    candle_start = get_candle_start(ts)
+    c = candles.get(symbol)
+
+    # New candle slot
+    if c is None or c["start"] != candle_start:
+        if c:
+            close_candle(symbol, c)
+
+        candles[symbol] = {
+            "start": candle_start,
+            "open": ltp,
+            "high": ltp,
+            "low": ltp,
+            "close": ltp,
+            "cum_vol": vol
+        }
+        return
+
+    # Update ongoing candle
+    c["high"] = max(c["high"], ltp)
+    c["low"]  = min(c["low"], ltp)
+    c["close"] = ltp
+    c["cum_vol"] = vol
+
+
+# ------------------------------------------------------------
+# WebSocket Callbacks (NO TICK PRINTS)
+# ------------------------------------------------------------
+def on_message(message):
+    try:
+        update_candle_from_tick(message)
+    except Exception as e:
+        print("🔥 Candle logic error:", e)
+
+
+def on_error(message):
+    print("❌ WS ERROR:", message)
+
+
+def on_close(message):
+    print("🔌 WS CLOSED:", message)
+
+
+def on_connect():
+    print("🔗 WS CONNECTED")
+
+    # --------------------------------------------------------
+    # ⭐ ALL 160–170 SYMBOLS EXACTLY AS PROVIDED
+    # --------------------------------------------------------
+    symbols = [
+        "NSE:EICHERMOT-EQ","NSE:SONACOMS-EQ","NSE:TVSMOTOR-EQ","NSE:MARUTI-EQ",
+        "NSE:TMPV-EQ","NSE:M&M-EQ","NSE:MOTHERSON-EQ","NSE:TIINDIA-EQ",
+        "NSE:BHARATFORG-EQ","NSE:BOSCHLTD-EQ","NSE:EXIDEIND-EQ","NSE:ASHOKLEY-EQ",
+        "NSE:UNOMINDA-EQ","NSE:BAJAJ-AUTO-EQ","NSE:HEROMOTOCO-EQ",
+
+        "NSE:SHRIRAMFIN-EQ","NSE:SBIN-EQ","NSE:BSE-EQ","NSE:AXISBANK-EQ",
+        "NSE:BAJFINANCE-EQ","NSE:PFC-EQ","NSE:LICHSGFIN-EQ","NSE:KOTAKBANK-EQ",
+        "NSE:RECLTD-EQ","NSE:BAJAJFINSV-EQ","NSE:ICICIGI-EQ","NSE:JIOFIN-EQ",
+        "NSE:HDFCBANK-EQ","NSE:ICICIBANK-EQ","NSE:ICICIPRULI-EQ",
+        "NSE:SBILIFE-EQ","NSE:HDFCLIFE-EQ","NSE:SBICARD-EQ",
+        "NSE:MUTHOOTFIN-EQ","NSE:CHOLAFIN-EQ",
+
+        "NSE:TATACONSUM-EQ","NSE:PATANJALI-EQ","NSE:BRITANNIA-EQ",
+        "NSE:HINDUNILVR-EQ","NSE:GODREJCP-EQ","NSE:MARICO-EQ","NSE:ITC-EQ",
+        "NSE:NESTLEIND-EQ","NSE:UBL-EQ","NSE:DABUR-EQ","NSE:EMAMILTD-EQ",
+        "NSE:VBL-EQ","NSE:UNITDSPR-EQ","NSE:RADICO-EQ","NSE:COLPAL-EQ",
+
+        "NSE:WIPRO-EQ","NSE:INFY-EQ","NSE:TCS-EQ","NSE:PERSISTENT-EQ",
+        "NSE:LTIM-EQ","NSE:MPHASIS-EQ","NSE:HCLTECH-EQ","NSE:TECHM-EQ",
+        "NSE:COFORGE-EQ","NSE:OFSS-EQ",
+
+        "NSE:ZEEL-EQ","NSE:PVRINOX-EQ","NSE:DBCORP-EQ","NSE:HATHWAY-EQ",
+        "NSE:SUNTV-EQ","NSE:TIPSMUSIC-EQ","NSE:NETWORK18-EQ","NSE:PFOCUS-EQ",
+        "NSE:NAZARA-EQ","NSE:SAREGAMA-EQ",
+
+        "NSE:APLAPOLLO-EQ","NSE:HINDZINC-EQ","NSE:HINDALCO-EQ","NSE:NATIONALUM-EQ",
+        "NSE:TATASTEEL-EQ","NSE:SAIL-EQ","NSE:NMDC-EQ","NSE:LLOYDSME-EQ",
+        "NSE:VEDL-EQ","NSE:HINDCOPPER-EQ","NSE:JSWSTEEL-EQ","NSE:ADANIENT-EQ",
+        "NSE:JINDALSTEL-EQ","NSE:WELCORP-EQ","NSE:JSL-EQ",
+
+        "NSE:AUROPHARMA-EQ","NSE:LUPIN-EQ","NSE:JBCHEPHARM-EQ","NSE:BIOCON-EQ",
+        "NSE:LAURUSLABS-EQ","NSE:ZYDUSLIFE-EQ","NSE:SUNPHARMA-EQ",
+        "NSE:MANKIND-EQ","NSE:WOCKPHARMA-EQ","NSE:TORNTPHARM-EQ",
+        "NSE:CIPLA-EQ","NSE:AJANTPHARM-EQ","NSE:DRREDDY-EQ","NSE:GLAND-EQ",
+        "NSE:ABBOTINDIA-EQ","NSE:ALKEM-EQ","NSE:PPLPHARMA-EQ",
+        "NSE:DIVISLAB-EQ","NSE:GLENMARK-EQ","NSE:IPCALAB-EQ",
+
+        "NSE:CANBK-EQ","NSE:BANKINDIA-EQ","NSE:PNB-EQ","NSE:BANKBARODA-EQ",
+        "NSE:INDIANB-EQ","NSE:MAHABANK-EQ","NSE:UNIONBANK-EQ","NSE:PSB-EQ",
+        "NSE:UCOBANK-EQ","NSE:CENTRALBK-EQ","NSE:IOB-EQ",
+        "NSE:IDFCFIRSTB-EQ","NSE:FEDERALBNK-EQ","NSE:YESBANK-EQ",
+        "NSE:INDUSINDBK-EQ","NSE:BANDHANBNK-EQ","NSE:RBLBANK-EQ",
+
+        "NSE:IGL-EQ","NSE:PETRONET-EQ","NSE:MGL-EQ","NSE:GAIL-EQ","NSE:IOC-EQ",
+        "NSE:RELIANCE-EQ","NSE:ONGC-EQ","NSE:CASTROLIND-EQ","NSE:GUJGASLTD-EQ",
+        "NSE:BPCL-EQ","NSE:HINDPETRO-EQ","NSE:GSPL-EQ","NSE:ATGL-EQ",
+        "NSE:OIL-EQ","NSE:AEGISLOG-EQ",
+
+        "NSE:SWANCORP-EQ","NSE:ATUL-EQ","NSE:SRF-EQ","NSE:DEEPAKNTR-EQ",
+        "NSE:LINDEINDIA-EQ","NSE:FLUOROCHEM-EQ","NSE:PCBL-EQ","NSE:UPL-EQ",
+        "NSE:TATACHEM-EQ","NSE:DEEPAKFERT-EQ","NSE:HSCL-EQ","NSE:BAYERCROP-EQ",
+        "NSE:SOLARINDS-EQ","NSE:CHAMBLFERT-EQ","NSE:PIDILITIND-EQ",
+        "NSE:SUMICHEM-EQ","NSE:PIIND-EQ","NSE:AARTIIND-EQ",
+        "NSE:NAVINFLUOR-EQ","NSE:COROMANDEL-EQ"
+    ]
+
+    print(f"📡 Subscribing TOTAL symbols: {len(symbols)}")
+    fyers_ws.subscribe(symbols=symbols, data_type="SymbolUpdate")
+
+
+# ------------------------------------------------------------
+# Start WS
+# ------------------------------------------------------------
+def start_ws():
+    global fyers_ws
+    fyers_ws = data_ws.FyersDataSocket(
+        access_token=FYERS_ACCESS_TOKEN,
+        on_message=on_message,
+        on_error=on_error,
+        on_close=on_close,
+        on_connect=on_connect,
+        reconnect=True
+    )
+    fyers_ws.connect()
+
+
+threading.Thread(target=start_ws, daemon=True).start()
+
+
+# ------------------------------------------------------------
+# Start Flask
 # ------------------------------------------------------------
 if __name__ == "__main__":
-    # Render usually sets PORT itself, but keep default 10000
-    port = int(os.getenv("PORT", "10000"))
+    port = int(os.environ.get("PORT", 10000))
+    print(f"🌐 Starting Flask on port {port}")
     app.run(host="0.0.0.0", port=port)
