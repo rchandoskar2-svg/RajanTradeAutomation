@@ -1,71 +1,49 @@
 # ============================================================
-# RajanTradeAutomation – main.py (FINAL – CORRECTED)
-# Tick → 5m Candle → Sector Mapping → Signal Engine
+# RajanTradeAutomation – FINAL main.py
+# BASE: Your LOCKED Flask Backend (redirect + ping + tests)
+# ADDITIONS:
+#   - FYERS WebSocket live ticks
+#   - Settings-sheet driven timings
+#   - Tick → 5m Candle Engine
+#   - Sector breadth (80%) selection
+#   - Signal engine integration
 # ============================================================
 
+from flask import Flask, request, jsonify
+import requests
 import os
 import time
 import threading
-import requests
 from datetime import datetime
-from flask import Flask, jsonify
 from fyers_apiv3.FyersWebsocket import data_ws
 
 # ============================================================
-# ENV (Render) – DO NOT TOUCH
+# FLASK APP (LOCKED BASE)
 # ============================================================
-WEBAPP_URL = os.getenv("WEBAPP_URL")
-FYERS_CLIENT_ID = os.getenv("FYERS_CLIENT_ID")
-FYERS_ACCESS_TOKEN = os.getenv("FYERS_ACCESS_TOKEN")
-
-if not WEBAPP_URL or not FYERS_ACCESS_TOKEN:
-    raise Exception("Missing ENV variables")
+app = Flask(__name__)
 
 # ============================================================
-# TIME CONFIG (LOCKED – STRATEGY)
+# ENVIRONMENT VARIABLES (Render)
 # ============================================================
-TICK_START = "09:14:00"     # silent tick window
-BIAS_TIME  = "09:25:05"     # sector snapshot
-STOP_TIME  = "15:30:00"     # hard stop
-CANDLE_SEC = 300            # 5-minute candles
+WEBAPP_URL = os.getenv("WEBAPP_URL", "").strip()
+
+FYERS_CLIENT_ID = os.getenv("FYERS_CLIENT_ID", "").strip()
+FYERS_SECRET_KEY = os.getenv("FYERS_SECRET_KEY", "").strip()
+FYERS_REDIRECT_URI = os.getenv("FYERS_REDIRECT_URI", "").strip()
+FYERS_ACCESS_TOKEN = os.getenv("FYERS_ACCESS_TOKEN", "").strip()
 
 # ============================================================
-# IMPORT STRATEGY MODULES (ALREADY PROVIDED)
+# IMPORT STRATEGY MODULES (ALREADY PROVIDED BY YOU)
 # ============================================================
 from sector_mapping import SECTOR_MAP
 from sector_engine import maybe_run_sector_decision, get_bias
 from signal_engine import on_new_candle
 
 # ============================================================
-# SYMBOL LIST (FULL – DO NOT TRIM)
-# ============================================================
-SYMBOLS = [
-    "NSE:EICHERMOT-EQ","NSE:SONACOMS-EQ","NSE:TVSMOTOR-EQ","NSE:MARUTI-EQ",
-    "NSE:TMPV-EQ","NSE:M&M-EQ","NSE:MOTHERSON-EQ","NSE:TIINDIA-EQ",
-    "NSE:BHARATFORG-EQ","NSE:BOSCHLTD-EQ","NSE:EXIDEIND-EQ","NSE:ASHOKLEY-EQ",
-    "NSE:UNOMINDA-EQ","NSE:BAJAJ-AUTO-EQ","NSE:HEROMOTOCO-EQ",
-
-    "NSE:SHRIRAMFIN-EQ","NSE:SBIN-EQ","NSE:BSE-EQ","NSE:AXISBANK-EQ",
-    "NSE:BAJFINANCE-EQ","NSE:PFC-EQ","NSE:LICHSGFIN-EQ","NSE:KOTAKBANK-EQ",
-    "NSE:RECLTD-EQ","NSE:BAJAJFINSV-EQ","NSE:JIOFIN-EQ",
-    "NSE:HDFCBANK-EQ","NSE:ICICIBANK-EQ","NSE:SBILIFE-EQ","NSE:HDFCLIFE-EQ",
-
-    "NSE:ITC-EQ","NSE:HINDUNILVR-EQ","NSE:NESTLEIND-EQ","NSE:DABUR-EQ",
-    "NSE:BRITANNIA-EQ","NSE:MARICO-EQ","NSE:TATACONSUM-EQ",
-
-    "NSE:TCS-EQ","NSE:INFY-EQ","NSE:HCLTECH-EQ","NSE:TECHM-EQ",
-    "NSE:LTIM-EQ","NSE:MPHASIS-EQ",
-
-    "NSE:TATASTEEL-EQ","NSE:JSWSTEEL-EQ","NSE:HINDALCO-EQ","NSE:VEDL-EQ",
-
-    "NSE:SUNPHARMA-EQ","NSE:DRREDDY-EQ","NSE:CIPLA-EQ","NSE:DIVISLAB-EQ",
-
-    "NSE:RELIANCE-EQ","NSE:ONGC-EQ","NSE:BPCL-EQ","NSE:IOC-EQ"
-]
-
-# ============================================================
 # GLOBAL STATE
 # ============================================================
+CANDLE_SEC = 300  # 5 min
+
 tick_cache = {}
 candle_buf = {}
 prev_cum_vol = {}
@@ -75,46 +53,83 @@ day_open_price = {}
 pct_change_map = {}
 
 SELECTED_STOCKS = set()
-
-SETTINGS = {
-    "THRESHOLD": 80,
-    "MAX_UP": 2.5,
-    "MAX_DN": 2.5,
-    "BUY_SECTORS": 2,
-    "SELL_SECTORS": 2,
-    "PER_TRADE_RISK": 500
-}
+SETTINGS = {}
+TICK_START_TS = 0
 
 # ============================================================
 # HELPERS
 # ============================================================
-def post_webapp(action, payload):
+def call_webapp(action, payload=None, timeout=15):
+    if payload is None:
+        payload = {}
+    body = {"action": action, "payload": payload}
     try:
-        requests.post(
-            WEBAPP_URL,
-            json={"action": action, "payload": payload},
-            timeout=3
-        )
-    except:
-        pass
+        r = requests.post(WEBAPP_URL, json=body, timeout=timeout)
+        try:
+            return r.json()
+        except Exception:
+            return {"ok": True, "raw": r.text}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+def read_settings():
+    res = call_webapp("getSettings", {})
+    return res.get("settings", {})
 
 def candle_direction(o, c):
-    if c > o: return "GREEN"
-    if c < o: return "RED"
-    return "NEUTRAL"
+    if c > o:
+        return "GREEN"
+    if c < o:
+        return "RED"
+    return "DOJI"
 
 # ============================================================
-# PHASE-B ACTIVATION
+# ROOT + HEALTH CHECK (LOCKED)
 # ============================================================
-def activate_phase_b(symbols):
-    global SELECTED_STOCKS
-    SELECTED_STOCKS = set(symbols)
-    print("PHASE-B ACTIVE | SELECTED STOCKS:", len(SELECTED_STOCKS))
+@app.route("/", methods=["GET"])
+def root():
+    return "RajanTradeAutomation backend is LIVE ✅", 200
+
+@app.route("/ping", methods=["GET"])
+def ping():
+    return "PONG", 200
 
 # ============================================================
-# 5-MIN CANDLE ENGINE (CORRECT VOLUME LOGIC)
+# SETTINGS FETCH (LOCKED)
+# ============================================================
+@app.route("/getSettings", methods=["GET"])
+def get_settings():
+    result = call_webapp("getSettings", {})
+    return jsonify(result)
+
+# ============================================================
+# FYERS OAUTH REDIRECT (LOCKED)
+# ============================================================
+@app.route("/fyers-redirect", methods=["GET"])
+def fyers_redirect():
+    status = request.args.get("s") or request.args.get("status", "")
+    auth_code = request.args.get("auth_code", "")
+    state = request.args.get("state", "")
+
+    html = f"""
+    <h2>Fyers Redirect Handler</h2>
+    <p>Status: <b>{status}</b></p>
+    <p>State: <b>{state}</b></p>
+    <p><b>Auth Code (copy & save safely):</b></p>
+    <textarea rows="5" cols="120">{auth_code}</textarea>
+    <p>हा code कुणालाही share करू नकोस.</p>
+    """
+    return html, 200
+
+# ============================================================
+# 5-MIN CANDLE ENGINE
 # ============================================================
 def handle_tick(symbol, ltp, vol, ts):
+    global candle_buf, prev_cum_vol, candle_index
+
+    if ts < TICK_START_TS:
+        return
+
     bucket = ts - (ts % CANDLE_SEC)
 
     if symbol not in candle_buf:
@@ -134,7 +149,7 @@ def handle_tick(symbol, ltp, vol, ts):
 
     if c["start"] == bucket:
         c["high"] = max(c["high"], ltp)
-        c["low"]  = min(c["low"], ltp)
+        c["low"] = min(c["low"], ltp)
         c["close"] = ltp
         c["cum_vol"] = vol
     else:
@@ -152,17 +167,19 @@ def handle_tick(symbol, ltp, vol, ts):
             "low": c["low"],
             "close": c["close"],
             "volume": vol_diff,
-            "index": candle_index[symbol],
+            "candle_index": candle_index[symbol],
+            "lowest_volume_so_far": 0,
+            "is_signal": False,
             "direction": candle_direction(c["open"], c["close"])
         }
 
-        post_webapp("pushCandle", {"candles": [candle]})
+        call_webapp("pushCandle", {"candles": [candle]})
 
         if symbol in SELECTED_STOCKS:
             bias = get_bias(symbol)
             signal = on_new_candle(symbol, candle, bias, SETTINGS)
             if signal:
-                post_webapp("pushSignal", {"signals": [signal]})
+                call_webapp("pushSignal", {"signals": [signal]})
 
         candle_buf[symbol] = {
             "start": bucket,
@@ -174,13 +191,13 @@ def handle_tick(symbol, ltp, vol, ts):
         }
 
 # ============================================================
-# FYERS WS CALLBACK
+# FYERS WS CALLBACKS
 # ============================================================
 def on_message(msg):
     sym = msg.get("symbol")
     ltp = msg.get("ltp")
     vol = msg.get("vol_traded_today")
-    ts  = msg.get("exch_feed_time")
+    ts = msg.get("exch_feed_time")
 
     if not sym:
         return
@@ -190,40 +207,51 @@ def on_message(msg):
 
     pct_change_map[sym] = ((ltp - day_open_price[sym]) / day_open_price[sym]) * 100
 
-    tick_cache[sym] = {"ltp": ltp}
-
     handle_tick(sym, ltp, vol, ts)
 
 def on_open():
-    ws.subscribe(symbols=SYMBOLS, data_type="SymbolUpdate")
+    # subscribe to all unique stocks from sector map
+    symbols = sorted({s for lst in SECTOR_MAP.values() for s in lst})
+    ws.subscribe(symbols=symbols, data_type="SymbolUpdate")
 
 # ============================================================
-# ENGINE LOOP
+# ENGINE LOOP (SECTOR DECISION)
 # ============================================================
 def engine_loop():
+    global SETTINGS, TICK_START_TS, SELECTED_STOCKS
+
+    SETTINGS = read_settings()
+
+    # Tick start time from Settings
+    t = datetime.strptime(SETTINGS["TICK_START_TIME"], "%H:%M:%S")
+    now = datetime.now()
+    TICK_START_TS = int(
+        t.replace(year=now.year, month=now.month, day=now.day).timestamp()
+    )
+
     while True:
         now = datetime.now()
 
         maybe_run_sector_decision(
             now=now,
             pct_change_map=pct_change_map,
-            bias_time=BIAS_TIME,
-            threshold=SETTINGS["THRESHOLD"],
-            max_up=SETTINGS["MAX_UP"],
-            max_dn=SETTINGS["MAX_DN"],
-            buy_sector_count=SETTINGS["BUY_SECTORS"],
-            sell_sector_count=SETTINGS["SELL_SECTORS"],
+            bias_time=SETTINGS["BIAS_TIME"],
+            threshold=float(SETTINGS["BIAS_THRESHOLD_PERCENT"]),
+            max_up=float(SETTINGS["MAX_UP_PERCENT"]),
+            max_dn=abs(float(SETTINGS["MAX_DOWN_PERCENT"])),
+            buy_sector_count=int(SETTINGS["BUY_SECTOR_COUNT"]),
+            sell_sector_count=int(SETTINGS["SELL_SECTOR_COUNT"]),
             sector_map=SECTOR_MAP,
-            phase_b_switch=activate_phase_b
+            phase_b_switch=lambda s: SELECTED_STOCKS.update(s)
         )
 
-        if now.strftime("%H:%M:%S") >= STOP_TIME:
+        if now.strftime("%H:%M:%S") >= SETTINGS["AUTO_SQUAREOFF_TIME"]:
             break
 
         time.sleep(1)
 
 # ============================================================
-# START WS
+# START FYERS WS
 # ============================================================
 ws = data_ws.FyersDataSocket(
     access_token=FYERS_ACCESS_TOKEN,
@@ -233,18 +261,10 @@ ws = data_ws.FyersDataSocket(
 )
 
 # ============================================================
-# FLASK KEEP-ALIVE (LOCKED)
-# ============================================================
-app = Flask(__name__)
-
-@app.route("/")
-def home():
-    return jsonify({"ok": True})
-
-# ============================================================
-# MAIN
+# FLASK ENTRY POINT (LOCKED)
 # ============================================================
 if __name__ == "__main__":
+    port = int(os.getenv("PORT", "10000"))
     threading.Thread(target=ws.connect, daemon=True).start()
     threading.Thread(target=engine_loop, daemon=True).start()
-    app.run(host="0.0.0.0", port=10000)
+    app.run(host="0.0.0.0", port=port)
