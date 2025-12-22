@@ -1,12 +1,6 @@
 # ============================================================
-# RajanTradeAutomation – FINAL main.py
-# BASE: Your LOCKED Flask Backend (redirect + ping + tests)
-# ADDITIONS:
-#   - FYERS WebSocket live ticks
-#   - Settings-sheet driven timings
-#   - Tick → 5m Candle Engine
-#   - Sector breadth (80%) selection
-#   - Signal engine integration
+# RajanTradeAutomation – FINAL main.py (FIXED)
+# Flask Base (LOCKED) + Strategy Engine + Time Parsing FIX
 # ============================================================
 
 from flask import Flask, request, jsonify
@@ -33,7 +27,7 @@ FYERS_REDIRECT_URI = os.getenv("FYERS_REDIRECT_URI", "").strip()
 FYERS_ACCESS_TOKEN = os.getenv("FYERS_ACCESS_TOKEN", "").strip()
 
 # ============================================================
-# IMPORT STRATEGY MODULES (ALREADY PROVIDED BY YOU)
+# STRATEGY IMPORTS
 # ============================================================
 from sector_mapping import SECTOR_MAP
 from sector_engine import maybe_run_sector_decision, get_bias
@@ -72,16 +66,40 @@ def call_webapp(action, payload=None, timeout=15):
     except Exception as e:
         return {"ok": False, "error": str(e)}
 
-def read_settings():
-    res = call_webapp("getSettings", {})
-    return res.get("settings", {})
-
 def candle_direction(o, c):
     if c > o:
         return "GREEN"
     if c < o:
         return "RED"
     return "DOJI"
+
+# ============================================================
+# ⭐ TIME PARSING FIX (CRITICAL)
+# ============================================================
+def parse_time_setting(value: str) -> datetime:
+    """
+    Accepts:
+    - '09:14:00'
+    - '1899-12-30T03:52:50.000Z'
+    Returns datetime for TODAY
+    """
+    now = datetime.now()
+
+    # Case 1: HH:MM:SS
+    try:
+        t = datetime.strptime(value, "%H:%M:%S").time()
+        return datetime.combine(now.date(), t)
+    except Exception:
+        pass
+
+    # Case 2: ISO / Sheets datetime
+    try:
+        dt = datetime.fromisoformat(value.replace("Z", ""))
+        return datetime.combine(now.date(), dt.time())
+    except Exception:
+        pass
+
+    raise ValueError(f"Invalid time format in Settings: {value}")
 
 # ============================================================
 # ROOT + HEALTH CHECK (LOCKED)
@@ -99,8 +117,7 @@ def ping():
 # ============================================================
 @app.route("/getSettings", methods=["GET"])
 def get_settings():
-    result = call_webapp("getSettings", {})
-    return jsonify(result)
+    return jsonify(call_webapp("getSettings", {}))
 
 # ============================================================
 # FYERS OAUTH REDIRECT (LOCKED)
@@ -206,28 +223,26 @@ def on_message(msg):
         day_open_price[sym] = ltp
 
     pct_change_map[sym] = ((ltp - day_open_price[sym]) / day_open_price[sym]) * 100
-
     handle_tick(sym, ltp, vol, ts)
 
 def on_open():
-    # subscribe to all unique stocks from sector map
     symbols = sorted({s for lst in SECTOR_MAP.values() for s in lst})
     ws.subscribe(symbols=symbols, data_type="SymbolUpdate")
 
 # ============================================================
-# ENGINE LOOP (SECTOR DECISION)
+# ENGINE LOOP
 # ============================================================
 def engine_loop():
-    global SETTINGS, TICK_START_TS, SELECTED_STOCKS
+    global SETTINGS, TICK_START_TS
 
-    SETTINGS = read_settings()
+    SETTINGS = call_webapp("getSettings", {}).get("settings", {})
 
-    # Tick start time from Settings
-    t = datetime.strptime(SETTINGS["TICK_START_TIME"], "%H:%M:%S")
-    now = datetime.now()
-    TICK_START_TS = int(
-        t.replace(year=now.year, month=now.month, day=now.day).timestamp()
-    )
+    try:
+        tick_start_dt = parse_time_setting(SETTINGS["TICK_START_TIME"])
+        TICK_START_TS = int(tick_start_dt.timestamp())
+    except Exception as e:
+        print("❌ TICK_START_TIME error:", e)
+        return
 
     while True:
         now = datetime.now()
@@ -261,7 +276,7 @@ ws = data_ws.FyersDataSocket(
 )
 
 # ============================================================
-# FLASK ENTRY POINT (LOCKED)
+# ENTRY POINT
 # ============================================================
 if __name__ == "__main__":
     port = int(os.getenv("PORT", "10000"))
