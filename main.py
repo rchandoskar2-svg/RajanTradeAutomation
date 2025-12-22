@@ -1,39 +1,42 @@
 # ============================================================
 # RajanTradeAutomation – main.py (Render Stable WS Version)
 # FIXED: setuptools<81, FYERS WS, Render-safe threading
-# + FYERS CALLBACK URI ROUTE
-# + FYERS-REDIRECT ROUTE
-# + LOCAL-PROVEN 5-MIN CANDLE ENGINE
-# + GOOGLE SHEET PUSH CANDLE (ENV-BASED)
+# FYERS CALLBACK URI + FYERS-REDIRECT
+# LOCAL-PROVEN 5-MIN CANDLE ENGINE
+# GOOGLE SHEET PUSH CANDLE
+# NOISE-FREE (Ticks NOT printed)
 # ============================================================
 
 import os
 import time
 import threading
+from datetime import datetime
 from flask import Flask, jsonify, request
-import requests
+import requests   # needed for push
 
 print("🚀 main.py STARTED")
 
-
 # ------------------------------------------------------------
-# ENV VARIABLES
+# ENV CHECK
 # ------------------------------------------------------------
 FYERS_CLIENT_ID = os.getenv("FYERS_CLIENT_ID")
 FYERS_ACCESS_TOKEN = os.getenv("FYERS_ACCESS_TOKEN")
-WEBAPP_URL = os.getenv("WEBAPP_URL")        # ⭐ READ FROM ENV (CORRECT WAY)
+WEBAPP_URL = os.getenv("WEBAPP_URL")  # ⭐ NOW READ FROM ENV
 
 print("🔍 ENV CHECK")
 print("FYERS_CLIENT_ID =", FYERS_CLIENT_ID)
-print("WEBAPP_URL =", WEBAPP_URL)
 print("FYERS_ACCESS_TOKEN prefix =", FYERS_ACCESS_TOKEN[:20] if FYERS_ACCESS_TOKEN else "❌ MISSING")
+print("WEBAPP_URL =", WEBAPP_URL)
 
-if not FYERS_CLIENT_ID or not FYERS_ACCESS_TOKEN or not WEBAPP_URL:
-    raise Exception("❌ ENV Missing: FYERS_CLIENT_ID / FYERS_ACCESS_TOKEN / WEBAPP_URL")
+if not FYERS_CLIENT_ID or not FYERS_ACCESS_TOKEN:
+    raise Exception("❌ FYERS ENV variables missing")
+
+if not WEBAPP_URL:
+    raise Exception("❌ WEBAPP_URL missing in environment")
 
 
 # ------------------------------------------------------------
-# Flask application
+# Flask App Base
 # ------------------------------------------------------------
 app = Flask(__name__)
 
@@ -43,7 +46,7 @@ def health():
 
 
 # ------------------------------------------------------------
-# FYERS CALLBACK
+# FYERS CALLBACK (Original)
 # ------------------------------------------------------------
 @app.route("/callback")
 def fyers_callback():
@@ -51,21 +54,24 @@ def fyers_callback():
     print("🔑 FYERS CALLBACK HIT:", auth_code)
     if not auth_code:
         return jsonify({"error": "auth_code missing"}), 400
+
     return jsonify({"status": "callback_received", "auth_code": auth_code})
 
 
 # ------------------------------------------------------------
-# FYERS REDIRECT (Your Custom Route)
+# FYERS REDIRECT (Custom)
 # ------------------------------------------------------------
 @app.route("/fyers-redirect")
 def fyers_redirect():
     try:
         auth_code = request.args.get("auth_code")
         print("🔑 FYERS REDIRECT HIT:", auth_code)
+
         if not auth_code:
             return jsonify({"error": "auth_code missing"}), 400
 
         return jsonify({"status": "redirect_received", "auth_code": auth_code})
+
     except Exception as e:
         print("🔥 Redirect error:", e)
         return jsonify({"error": str(e)}), 500
@@ -75,11 +81,11 @@ def fyers_redirect():
 # FYERS WebSocket
 # ------------------------------------------------------------
 from fyers_apiv3.FyersWebsocket import data_ws
-print("✅ WebSocket Import successful")
+print("✅ data_ws IMPORT SUCCESS")
 
 
 # ------------------------------------------------------------
-# SEND CANDLE → GOOGLE SHEET (ENV-based)
+# Push Candle to Google Sheet  ⭐⭐⭐
 # ------------------------------------------------------------
 def push_to_webapp(symbol, c, candle_volume):
     try:
@@ -98,8 +104,9 @@ def push_to_webapp(symbol, c, candle_volume):
                 }]
             }
         }
-        r = requests.post(WEBAPP_URL, json=payload, timeout=4)
-        print("📤 PUSH RESULT:", r.text)
+
+        r = requests.post(WEBAPP_URL, json=payload, timeout=6)
+        print("📤 PUSH → WebApp:", r.text)
 
     except Exception as e:
         print("🔥 PUSH ERROR:", e)
@@ -109,6 +116,7 @@ def push_to_webapp(symbol, c, candle_volume):
 # 5-MIN CANDLE ENGINE
 # ------------------------------------------------------------
 CANDLE_INTERVAL = 300
+
 candles = {}
 last_candle_vol = {}
 
@@ -121,11 +129,14 @@ def close_candle(symbol, c):
     candle_volume = c["cum_vol"] - prev_vol
     last_candle_vol[symbol] = c["cum_vol"]
 
+    # ⭐ PUSH TO GOOGLE SHEET
     push_to_webapp(symbol, c, candle_volume)
 
+    # ⭐ Only candle logs → NO noise
     print(f"\n🟩 5m CANDLE {symbol}")
+    print(f"Time: {time.strftime('%H:%M:%S', time.localtime(c['start']))}")
     print(f"O:{c['open']} H:{c['high']} L:{c['low']} C:{c['close']} V:{candle_volume}")
-    print("---------------------------")
+    print("--------------------------------------------------")
 
 
 def update_candle_from_tick(msg):
@@ -143,6 +154,7 @@ def update_candle_from_tick(msg):
     candle_start = get_candle_start(ts)
     c = candles.get(symbol)
 
+    # New candle slot
     if c is None or c["start"] != candle_start:
         if c:
             close_candle(symbol, c)
@@ -157,34 +169,37 @@ def update_candle_from_tick(msg):
         }
         return
 
+    # Update ongoing candle
     c["high"] = max(c["high"], ltp)
-    c["low"] = min(c["low"], ltp)
+    c["low"]  = min(c["low"], ltp)
     c["close"] = ltp
     c["cum_vol"] = vol
 
 
 # ------------------------------------------------------------
-# WS CALLBACKS
+# WebSocket Callbacks (NO TICK PRINTS)
 # ------------------------------------------------------------
 def on_message(message):
-    print("📩 WS:", message)
     try:
         update_candle_from_tick(message)
     except Exception as e:
         print("🔥 Candle logic error:", e)
 
+
 def on_error(message):
     print("❌ WS ERROR:", message)
+
 
 def on_close(message):
     print("🔌 WS CLOSED:", message)
 
+
 def on_connect():
     print("🔗 WS CONNECTED")
 
-    # -----------------------------------------------
-    # ⭐ ALL 160–170 stocks (Your full Universe)
-    # -----------------------------------------------
+    # --------------------------------------------------------
+    # ⭐ ALL 160–170 SYMBOLS EXACTLY AS PROVIDED
+    # --------------------------------------------------------
     symbols = [
         "NSE:EICHERMOT-EQ","NSE:SONACOMS-EQ","NSE:TVSMOTOR-EQ","NSE:MARUTI-EQ",
         "NSE:TMPV-EQ","NSE:M&M-EQ","NSE:MOTHERSON-EQ","NSE:TIINDIA-EQ",
@@ -242,12 +257,12 @@ def on_connect():
         "NSE:NAVINFLUOR-EQ","NSE:COROMANDEL-EQ"
     ]
 
-    print(f"📡 Subscribing to {len(symbols)} symbols…")
+    print(f"📡 Subscribing TOTAL symbols: {len(symbols)}")
     fyers_ws.subscribe(symbols=symbols, data_type="SymbolUpdate")
 
 
 # ------------------------------------------------------------
-# WS THREAD
+# Start WS
 # ------------------------------------------------------------
 def start_ws():
     global fyers_ws
@@ -266,9 +281,9 @@ threading.Thread(target=start_ws, daemon=True).start()
 
 
 # ------------------------------------------------------------
-# START FLASK
+# Start Flask
 # ------------------------------------------------------------
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
-    print("🌐 Flask starting on port", port)
+    print(f"🌐 Starting Flask on port {port}")
     app.run(host="0.0.0.0", port=port)
