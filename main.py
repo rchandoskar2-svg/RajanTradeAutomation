@@ -30,9 +30,9 @@ if not FYERS_CLIENT_ID or not FYERS_ACCESS_TOKEN:
     raise Exception("❌ FYERS ENV variables missing")
 
 # ------------------------------------------------------------
-# Google Sheet WebApp URL
+# Google Sheet WebApp URL  ⭐ (ADDED YOUR EXEC)
 # ------------------------------------------------------------
-WEBAPP_URL = "PUT_YOUR_EXEC_URL_HERE"   # <-- CHANGE THIS
+WEBAPP_URL = "https://script.google.com/macros/s/AKfycbwSDiqsEQW5BI8RuPScSq3VUmPxG7KlFGeDWk5_VK8LqTBe3hMgehJEgCK7Uu1xkE0-/exec"
 
 
 # ------------------------------------------------------------
@@ -78,7 +78,7 @@ from fyers_apiv3.FyersWebsocket import data_ws
 print("✅ data_ws IMPORT SUCCESS")
 
 # ------------------------------------------------------------
-# Push Candle to Google Sheet  ⭐⭐
+# Push Candle to Google Sheet  ⭐⭐⭐
 # ------------------------------------------------------------
 def push_to_webapp(symbol, c, candle_volume):
     try:
@@ -98,7 +98,7 @@ def push_to_webapp(symbol, c, candle_volume):
             }
         }
         r = requests.post(WEBAPP_URL, json=payload, timeout=4)
-        print("📤 PUSH:", r.text)
+        print("📤 PUSH → WebApp:", r.text)
     except Exception as e:
         print("🔥 PUSH ERROR:", e)
 
@@ -119,7 +119,7 @@ def close_candle(symbol, c):
     candle_volume = c["cum_vol"] - prev_vol
     last_candle_vol[symbol] = c["cum_vol"]
 
-    # ⭐⭐⭐ ADD PUSH HERE
+    # ⭐⭐⭐ PUSH TO GOOGLE SHEET
     push_to_webapp(symbol, c, candle_volume)
 
     print(f"\n🟩 5m CANDLE {symbol}")
@@ -203,7 +203,7 @@ def on_connect():
         "NSE:VBL-EQ","NSE:UNITDSPR-EQ","NSE:RADICO-EQ","NSE:COLPAL-EQ",
 
         "NSE:WIPRO-EQ","NSE:INFY-EQ","NSE:TCS-EQ","NSE:PERSISTENT-EQ",
-        "NSE:LTIM-EQ","NSE:MPHASIS-EQ","NSE:HCLTECH-EQ","NSE:TECHM-EQ",
+        "NSE:LTIM-EQ","NSE:MPHASIS-E-EQ","NSE:HCLTECH-EQ","NSE:TECHM-EQ",
         "NSE:COFORGE-EQ","NSE:OFSS-EQ",
 
         "NSE:ZEEL-EQ","NSE:PVRINOX-EQ","NSE:DBCORP-EQ","NSE:HATHWAY-EQ",
