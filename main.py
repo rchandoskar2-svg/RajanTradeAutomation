@@ -4,6 +4,7 @@
 # + FYERS CALLBACK URI ROUTE
 # + LOCAL-PROVEN 5-MIN CANDLE BUILD (CUM VOL BASED)
 # + FYERS-REDIRECT ROUTE (ADDED)
+# + GOOGLE SHEET PUSH CANDLE (ADDED)
 # ============================================================
 
 import os
@@ -11,6 +12,7 @@ import time
 import threading
 from datetime import datetime
 from flask import Flask, jsonify, request
+import requests   # ⭐ Needed for push
 
 print("🚀 main.py STARTED")
 
@@ -22,59 +24,48 @@ FYERS_ACCESS_TOKEN = os.getenv("FYERS_ACCESS_TOKEN")
 
 print("🔍 ENV CHECK")
 print("FYERS_CLIENT_ID =", FYERS_CLIENT_ID)
-print(
-    "FYERS_ACCESS_TOKEN prefix =",
-    FYERS_ACCESS_TOKEN[:20] if FYERS_ACCESS_TOKEN else "❌ MISSING"
-)
+print("FYERS_ACCESS_TOKEN prefix =", FYERS_ACCESS_TOKEN[:20] if FYERS_ACCESS_TOKEN else "❌ MISSING")
 
 if not FYERS_CLIENT_ID or not FYERS_ACCESS_TOKEN:
     raise Exception("❌ FYERS ENV variables missing")
 
 # ------------------------------------------------------------
-# Flask App (Render keep-alive + FYERS redirect)
+# Google Sheet WebApp URL
+# ------------------------------------------------------------
+WEBAPP_URL = "PUT_YOUR_EXEC_URL_HERE"   # <-- CHANGE THIS
+
+
+# ------------------------------------------------------------
+# Flask App Base
 # ------------------------------------------------------------
 app = Flask(__name__)
 
 @app.route("/")
 def health():
-    return jsonify({
-        "status": "ok",
-        "service": "RajanTradeAutomation"
-    })
+    return jsonify({"status": "ok", "service": "RajanTradeAutomation"})
 
 # ------------------------------------------------------------
-# DEFAULT FYERS CALLBACK ROUTE
+# FYERS CALLBACK (Original)
 # ------------------------------------------------------------
 @app.route("/callback")
 def fyers_callback():
     auth_code = request.args.get("auth_code")
-    print("🔑 FYERS CALLBACK HIT | AUTH CODE =", auth_code)
-
+    print("🔑 FYERS CALLBACK HIT:", auth_code)
     if not auth_code:
         return jsonify({"error": "auth_code missing"}), 400
-
-    return jsonify({
-        "status": "callback_received",
-        "auth_code": auth_code
-    })
+    return jsonify({"status": "callback_received", "auth_code": auth_code})
 
 # ------------------------------------------------------------
-# CUSTOM FYERS-REDIRECT ROUTE (ADDED NOW)
+# FYERS REDIRECT (Custom)
 # ------------------------------------------------------------
 @app.route("/fyers-redirect")
 def fyers_redirect():
     try:
         auth_code = request.args.get("auth_code")
-        print("🔑 FYERS REDIRECT HIT | AUTH CODE =", auth_code)
-
+        print("🔑 FYERS REDIRECT HIT:", auth_code)
         if not auth_code:
             return jsonify({"error": "auth_code missing"}), 400
-
-        return jsonify({
-            "status": "redirect_received",
-            "auth_code": auth_code
-        })
-
+        return jsonify({"status": "redirect_received", "auth_code": auth_code})
     except Exception as e:
         print("🔥 Redirect error:", e)
         return jsonify({"error": str(e)}), 500
@@ -87,9 +78,35 @@ from fyers_apiv3.FyersWebsocket import data_ws
 print("✅ data_ws IMPORT SUCCESS")
 
 # ------------------------------------------------------------
-# 5-MIN CANDLE ENGINE (LOCAL-PROVEN LOGIC)
+# Push Candle to Google Sheet  ⭐⭐
 # ------------------------------------------------------------
-CANDLE_INTERVAL = 300  # 5 minutes
+def push_to_webapp(symbol, c, candle_volume):
+    try:
+        payload = {
+            "action": "pushCandle",
+            "payload": {
+                "candles": [{
+                    "symbol": symbol,
+                    "time": c["start"],
+                    "timeframe": "5",
+                    "open": c["open"],
+                    "high": c["high"],
+                    "low": c["low"],
+                    "close": c["close"],
+                    "volume": candle_volume
+                }]
+            }
+        }
+        r = requests.post(WEBAPP_URL, json=payload, timeout=4)
+        print("📤 PUSH:", r.text)
+    except Exception as e:
+        print("🔥 PUSH ERROR:", e)
+
+
+# ------------------------------------------------------------
+# 5-MIN CANDLE ENGINE
+# ------------------------------------------------------------
+CANDLE_INTERVAL = 300
 
 candles = {}
 last_candle_vol = {}
@@ -102,13 +119,13 @@ def close_candle(symbol, c):
     candle_volume = c["cum_vol"] - prev_vol
     last_candle_vol[symbol] = c["cum_vol"]
 
-    print(
-        f"\n🟩 5m CANDLE {symbol}"
-        f"\nTime : {time.strftime('%H:%M:%S', time.localtime(c['start']))}"
-        f"\nO:{c['open']} H:{c['high']} L:{c['low']} "
-        f"C:{c['close']} V:{candle_volume}"
-        f"\n---------------------------"
-    )
+    # ⭐⭐⭐ ADD PUSH HERE
+    push_to_webapp(symbol, c, candle_volume)
+
+    print(f"\n🟩 5m CANDLE {symbol}")
+    print(f"Time: {time.strftime('%H:%M:%S', time.localtime(c['start']))}")
+    print(f"O:{c['open']} H:{c['high']} L:{c['low']} C:{c['close']} V:{candle_volume}")
+    print("---------------------------")
 
 def update_candle_from_tick(msg):
     if not isinstance(msg, dict):
@@ -140,15 +157,16 @@ def update_candle_from_tick(msg):
         return
 
     c["high"] = max(c["high"], ltp)
-    c["low"] = min(c["low"], ltp)
+    c["low"]  = min(c["low"], ltp)
     c["close"] = ltp
     c["cum_vol"] = vol
+
 
 # ------------------------------------------------------------
 # WebSocket Callbacks
 # ------------------------------------------------------------
 def on_message(message):
-    print("📩 WS MESSAGE:", message)
+    print("📩 WS:", message)
     try:
         update_candle_from_tick(message)
     except Exception as e:
@@ -163,14 +181,15 @@ def on_close(message):
 def on_connect():
     print("🔗 WS CONNECTED")
 
+    # --------------------------------------------------------
+    # ⭐ ALL 160–170 SYMBOLS EXACTLY AS YOU PROVIDED
+    # --------------------------------------------------------
     symbols = [
-        # ---------- AUTO ----------
         "NSE:EICHERMOT-EQ","NSE:SONACOMS-EQ","NSE:TVSMOTOR-EQ","NSE:MARUTI-EQ",
         "NSE:TMPV-EQ","NSE:M&M-EQ","NSE:MOTHERSON-EQ","NSE:TIINDIA-EQ",
         "NSE:BHARATFORG-EQ","NSE:BOSCHLTD-EQ","NSE:EXIDEIND-EQ","NSE:ASHOKLEY-EQ",
         "NSE:UNOMINDA-EQ","NSE:BAJAJ-AUTO-EQ","NSE:HEROMOTOCO-EQ",
 
-        # ---------- FIN SERVICES ----------
         "NSE:SHRIRAMFIN-EQ","NSE:SBIN-EQ","NSE:BSE-EQ","NSE:AXISBANK-EQ",
         "NSE:BAJFINANCE-EQ","NSE:PFC-EQ","NSE:LICHSGFIN-EQ","NSE:KOTAKBANK-EQ",
         "NSE:RECLTD-EQ","NSE:BAJAJFINSV-EQ","NSE:ICICIGI-EQ","NSE:JIOFIN-EQ",
@@ -178,29 +197,24 @@ def on_connect():
         "NSE:SBILIFE-EQ","NSE:HDFCLIFE-EQ","NSE:SBICARD-EQ",
         "NSE:MUTHOOTFIN-EQ","NSE:CHOLAFIN-EQ",
 
-        # ---------- FMCG ----------
         "NSE:TATACONSUM-EQ","NSE:PATANJALI-EQ","NSE:BRITANNIA-EQ",
         "NSE:HINDUNILVR-EQ","NSE:GODREJCP-EQ","NSE:MARICO-EQ","NSE:ITC-EQ",
         "NSE:NESTLEIND-EQ","NSE:UBL-EQ","NSE:DABUR-EQ","NSE:EMAMILTD-EQ",
         "NSE:VBL-EQ","NSE:UNITDSPR-EQ","NSE:RADICO-EQ","NSE:COLPAL-EQ",
 
-        # ---------- IT ----------
         "NSE:WIPRO-EQ","NSE:INFY-EQ","NSE:TCS-EQ","NSE:PERSISTENT-EQ",
         "NSE:LTIM-EQ","NSE:MPHASIS-EQ","NSE:HCLTECH-EQ","NSE:TECHM-EQ",
         "NSE:COFORGE-EQ","NSE:OFSS-EQ",
 
-        # ---------- MEDIA ----------
         "NSE:ZEEL-EQ","NSE:PVRINOX-EQ","NSE:DBCORP-EQ","NSE:HATHWAY-EQ",
         "NSE:SUNTV-EQ","NSE:TIPSMUSIC-EQ","NSE:NETWORK18-EQ","NSE:PFOCUS-EQ",
         "NSE:NAZARA-EQ","NSE:SAREGAMA-EQ",
 
-        # ---------- METAL ----------
         "NSE:APLAPOLLO-EQ","NSE:HINDZINC-EQ","NSE:HINDALCO-EQ","NSE:NATIONALUM-EQ",
         "NSE:TATASTEEL-EQ","NSE:SAIL-EQ","NSE:NMDC-EQ","NSE:LLOYDSME-EQ",
         "NSE:VEDL-EQ","NSE:HINDCOPPER-EQ","NSE:JSWSTEEL-EQ","NSE:ADANIENT-EQ",
         "NSE:JINDALSTEL-EQ","NSE:WELCORP-EQ","NSE:JSL-EQ",
 
-        # ---------- PHARMA ----------
         "NSE:AUROPHARMA-EQ","NSE:LUPIN-EQ","NSE:JBCHEPHARM-EQ","NSE:BIOCON-EQ",
         "NSE:LAURUSLABS-EQ","NSE:ZYDUSLIFE-EQ","NSE:SUNPHARMA-EQ",
         "NSE:MANKIND-EQ","NSE:WOCKPHARMA-EQ","NSE:TORNTPHARM-EQ",
@@ -208,20 +222,17 @@ def on_connect():
         "NSE:ABBOTINDIA-EQ","NSE:ALKEM-EQ","NSE:PPLPHARMA-EQ",
         "NSE:DIVISLAB-EQ","NSE:GLENMARK-EQ","NSE:IPCALAB-EQ",
 
-        # ---------- PSU / PRIVATE BANK ----------
         "NSE:CANBK-EQ","NSE:BANKINDIA-EQ","NSE:PNB-EQ","NSE:BANKBARODA-EQ",
         "NSE:INDIANB-EQ","NSE:MAHABANK-EQ","NSE:UNIONBANK-EQ","NSE:PSB-EQ",
         "NSE:UCOBANK-EQ","NSE:CENTRALBK-EQ","NSE:IOB-EQ",
         "NSE:IDFCFIRSTB-EQ","NSE:FEDERALBNK-EQ","NSE:YESBANK-EQ",
         "NSE:INDUSINDBK-EQ","NSE:BANDHANBNK-EQ","NSE:RBLBANK-EQ",
 
-        # ---------- OIL & GAS ----------
         "NSE:IGL-EQ","NSE:PETRONET-EQ","NSE:MGL-EQ","NSE:GAIL-EQ","NSE:IOC-EQ",
         "NSE:RELIANCE-EQ","NSE:ONGC-EQ","NSE:CASTROLIND-EQ","NSE:GUJGASLTD-EQ",
         "NSE:BPCL-EQ","NSE:HINDPETRO-EQ","NSE:GSPL-EQ","NSE:ATGL-EQ",
         "NSE:OIL-EQ","NSE:AEGISLOG-EQ",
 
-        # ---------- CHEMICALS ----------
         "NSE:SWANCORP-EQ","NSE:ATUL-EQ","NSE:SRF-EQ","NSE:DEEPAKNTR-EQ",
         "NSE:LINDEINDIA-EQ","NSE:FLUOROCHEM-EQ","NSE:PCBL-EQ","NSE:UPL-EQ",
         "NSE:TATACHEM-EQ","NSE:DEEPAKFERT-EQ","NSE:HSCL-EQ","NSE:BAYERCROP-EQ",
@@ -234,7 +245,7 @@ def on_connect():
     fyers_ws.subscribe(symbols=symbols, data_type="SymbolUpdate")
 
 # ------------------------------------------------------------
-# Start WebSocket (NON-BLOCKING)
+# Start WS
 # ------------------------------------------------------------
 def start_ws():
     global fyers_ws
