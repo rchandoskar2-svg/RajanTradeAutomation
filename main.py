@@ -1,7 +1,6 @@
 # ============================================================
 # RajanTradeAutomation – FINAL MAIN.PY (PRODUCTION SAFE)
-# Flask + FYERS WS + Google Sheets (WebApp.gs)
-# TIME-SHIFT READY + WS → CANDLE FIXED
+# FIXED: WS SUBSCRIBE + TIME SHIFT READY
 # ============================================================
 
 import os
@@ -19,77 +18,61 @@ from sector_engine import maybe_run_sector_decision
 from sector_mapping import SECTOR_MAP
 
 # ============================================================
-# ENVIRONMENT VARIABLES (LOCKED)
+# ENV
 # ============================================================
 
 WEBAPP_URL = os.getenv("WEBAPP_URL", "").strip()
 FYERS_ACCESS_TOKEN = os.getenv("FYERS_ACCESS_TOKEN", "").strip()
 
 if not WEBAPP_URL or not FYERS_ACCESS_TOKEN:
-    raise Exception("Missing required ENV variables")
+    raise Exception("Missing ENV vars")
 
 # ============================================================
-# GLOBAL STATE
+# GLOBALS
 # ============================================================
 
 runtime = RuntimeConfig(WEBAPP_URL)
 runtime.refresh()
 
-pct_change_map = {}        # symbol -> %change
-ws_connected = False
+pct_change_map = {}
 engine_started = False
+ws_connected = False
 
 # ============================================================
-# SAFE TIME HELPERS
+# WEBAPP
 # ============================================================
 
-def now_dt():
-    return datetime.now()
-
-# ============================================================
-# WEBAPP COMMUNICATION
-# ============================================================
-
-def call_webapp(action, payload=None, timeout=10):
+def call_webapp(action, payload=None):
     try:
         return requests.post(
             WEBAPP_URL,
             json={"action": action, "payload": payload or {}},
-            timeout=timeout
+            timeout=5
         ).json()
     except Exception:
         return None
 
 # ============================================================
-# FYERS WEBSOCKET CALLBACKS
+# WS CALLBACKS
 # ============================================================
 
 def on_message(msg):
-    """
-    WS → enqueue_tick (CRITICAL FIX)
-    """
     try:
         symbol = msg.get("symbol")
         ltp = msg.get("ltp")
-        volume = msg.get("vol_traded_today", 0)
+        vol = msg.get("vol_traded_today", 0)
         exch_ts = msg.get("exch_feed_time")
 
         if not symbol or ltp is None or exch_ts is None:
             return
 
-        enqueue_tick(
-            symbol=symbol,
-            ltp=ltp,
-            volume=volume,
-            exch_ts=exch_ts
-        )
+        enqueue_tick(symbol, ltp, vol, exch_ts)
 
-        # % change cache (for sector engine)
         if "percent_change" in msg:
             pct_change_map[symbol] = msg["percent_change"]
 
     except Exception as e:
-        print("WS on_message error:", e)
+        print("on_message error:", e)
 
 
 def on_connect():
@@ -97,16 +80,30 @@ def on_connect():
     ws_connected = True
     print("✅ FYERS WS connected")
 
+    # 🔥🔥🔥 THIS IS THE MISSING PIECE 🔥🔥🔥
+    symbols = []
+    for lst in SECTOR_MAP.values():
+        symbols.extend(lst)
+
+    symbols = list(set(symbols))  # unique ~165–170
+
+    print(f"▶ Subscribing to {len(symbols)} symbols")
+
+    ws.subscribe(
+        symbols=symbols,
+        data_type="SymbolUpdate"
+    )
+
 
 def on_error(err):
-    print("❌ FYERS WS error:", err)
+    print("❌ WS error:", err)
 
 
 def on_close():
-    print("⚠️ FYERS WS closed")
+    print("⚠️ WS closed")
 
 # ============================================================
-# FYERS WS INIT
+# WS INIT
 # ============================================================
 
 ws = data_ws.FyersDataSocket(
@@ -122,26 +119,24 @@ def start_ws():
     ws.connect()
 
 # ============================================================
-# ENGINE SUPERVISOR LOOP
+# SUPERVISOR
 # ============================================================
 
-def supervisor_loop():
+def supervisor():
     global engine_started
 
     print("▶ Supervisor started")
 
     while True:
         runtime.refresh()
-        now = now_dt()
+        now = datetime.now()
 
-        # Start candle engine once tick window opens
         if not engine_started and runtime.is_tick_window_open(now):
             print("▶ Tick window open → starting candle engine")
             init_engine(runtime, call_webapp)
             threading.Thread(target=run_candle_engine, daemon=True).start()
             engine_started = True
 
-        # Sector decision (Phase-B trigger)
         maybe_run_sector_decision(
             now=now,
             pct_change_map=pct_change_map,
@@ -152,46 +147,42 @@ def supervisor_loop():
             buy_sector_count=runtime.buy_sector_count(),
             sell_sector_count=runtime.sell_sector_count(),
             sector_map=SECTOR_MAP,
-            phase_b_switch=lambda syms: call_webapp(
-                "pushState",
-                {"items": [{"key": "PHASE", "value": "B"}]}
-            )
+            phase_b_switch=lambda syms: print(f"▶ Phase-B symbols: {len(syms)}")
         )
 
         time.sleep(1)
 
 # ============================================================
-# FLASK APP (LOCKED ROUTES)
+# FLASK
 # ============================================================
 
 app = Flask(__name__)
 
 @app.route("/")
 def root():
-    return "RajanTradeAutomation backend LIVE ✅"
+    return "RajanTradeAutomation LIVE ✅"
 
 @app.route("/ping")
 def ping():
     return "PONG"
 
 @app.route("/getSettings")
-def api_get_settings():
+def get_settings():
     return jsonify({"ok": True, "settings": runtime.settings})
 
 @app.route("/fyers-redirect")
 def fyers_redirect():
-    auth_code = request.args.get("auth_code", "")
-    return f"<pre>{auth_code}</pre>"
+    return "<pre>Auth OK</pre>"
 
 # ============================================================
-# MAIN ENTRY
+# MAIN
 # ============================================================
 
 if __name__ == "__main__":
-    print("🚀 Starting RajanTradeAutomation (TIME-SHIFT READY)")
+    print("🚀 Starting RajanTradeAutomation (FINAL FIX)")
 
     threading.Thread(target=start_ws, daemon=True).start()
-    threading.Thread(target=supervisor_loop, daemon=True).start()
+    threading.Thread(target=supervisor, daemon=True).start()
 
     port = int(os.getenv("PORT", "10000"))
     app.run(host="0.0.0.0", port=port)
