@@ -52,7 +52,7 @@ def init_engine(runtime_cfg: RuntimeConfig, post_func):
 
 def switch_to_phase_b(selected_symbols: set):
     """
-    Called AFTER sector selection @ 09:25:05
+    Called AFTER sector selection @ 11:20:05
     """
     global _phase, _selected_symbols
     _phase = "B"
