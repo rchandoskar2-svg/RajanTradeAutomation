@@ -1,6 +1,6 @@
 # ============================================================
 # config_runtime.py
-# Runtime settings loader (NO fallback, env mandatory)
+# Single source of truth for ALL timings
 # ============================================================
 
 import os
@@ -17,32 +17,31 @@ class RuntimeConfig:
         self.last_fetch = None
 
     def refresh(self):
-        try:
-            r = requests.post(
-                self.webapp_url,
-                json={"action": "getSettings"},
-                timeout=5
-            )
-            r.raise_for_status()
-            self.settings = r.json().get("settings", {})
-            self.last_fetch = datetime.now()
-        except Exception as e:
-            print("⚠️ Settings fetch failed:", e)
+        r = requests.post(
+            self.webapp_url,
+            json={"action": "getSettings"},
+            timeout=5
+        )
+        r.raise_for_status()
+        self.settings = r.json().get("settings", {})
+        self.last_fetch = datetime.now()
 
-    def _get(self, key, default=None):
-        return self.settings.get(key, default)
+    def _get(self, key):
+        return self.settings.get(key)
 
     def _time(self, key):
-        v = self._get(key)
-        h, m, s = map(int, v.split(":"))
+        h, m, s = map(int, self._get(key).split(":"))
         return dtime(h, m, s)
 
-    # ---- PUBLIC ----
+    # ===== PUBLIC =====
     def tick_start_time(self):
         return self._time("TICK_START_TIME")
 
     def bias_time(self):
         return self._time("BIAS_TIME")
 
-    def bias_threshold(self):
-        return float(self._get("BIAS_THRESHOLD_PERCENT", 80))
+    def max_up(self):
+        return float(self._get("MAX_UP_PERCENT"))
+
+    def max_down(self):
+        return float(self._get("MAX_DOWN_PERCENT"))
