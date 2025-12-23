@@ -133,4 +133,63 @@ def supervisor():
 
         # Start candle engine after tick window opens
         if not engine_started and runtime.is_tick_window_open(now):
-            print("▶ Tic
+            print("▶ Tick window open → starting candle engine")
+            init_engine(runtime, call_webapp)
+            threading.Thread(
+                target=run_candle_engine,
+                daemon=True
+            ).start()
+            engine_started = True
+
+        # Sector decision
+        maybe_run_sector_decision(
+            now=now,
+            pct_change_map=pct_change_map,
+            bias_time=runtime.bias_time().strftime("%H:%M:%S"),
+            threshold=runtime.bias_threshold(),
+            max_up=runtime.max_up_percent(),
+            max_dn=runtime.max_down_percent(),
+            buy_sector_count=runtime.buy_sector_count(),
+            sell_sector_count=runtime.sell_sector_count(),
+            sector_map=SECTOR_MAP,
+            phase_b_switch=lambda syms: print(
+                f"▶ Phase-B activated ({len(syms)} symbols)"
+            )
+        )
+
+        time.sleep(1)
+
+# ============================================================
+# FLASK APP
+# ============================================================
+
+app = Flask(__name__)
+
+@app.route("/")
+def root():
+    return "RajanTradeAutomation LIVE ✅"
+
+@app.route("/ping")
+def ping():
+    return "PONG"
+
+@app.route("/getSettings")
+def get_settings():
+    return jsonify({"ok": True, "settings": runtime.settings})
+
+@app.route("/fyers-redirect")
+def fyers_redirect():
+    return "<pre>FYERS AUTH OK</pre>"
+
+# ============================================================
+# MAIN
+# ============================================================
+
+if __name__ == "__main__":
+    print("🚀 Starting RajanTradeAutomation (FINAL ABSOLUTE FIX)")
+
+    threading.Thread(target=start_ws, daemon=True).start()
+    threading.Thread(target=supervisor, daemon=True).start()
+
+    port = int(os.getenv("PORT", "10000"))
+    app.run(host="0.0.0.0", port=port)
