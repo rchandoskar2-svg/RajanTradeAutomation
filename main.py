@@ -1,6 +1,7 @@
 # ============================================================
 # RajanTradeAutomation – FINAL MAIN.PY (PRODUCTION SAFE)
 # Flask + FYERS WS + Google Sheets (WebApp.gs)
+# TIME-SHIFT READY + WS → CANDLE FIXED
 # ============================================================
 
 import os
@@ -11,15 +12,17 @@ import requests
 from flask import Flask, request, jsonify
 from fyers_apiv3.FyersWebsocket import data_ws
 
+from ws_client import enqueue_tick
+from config_runtime import RuntimeConfig
+from candle_engine import init_engine, run_candle_engine
+from sector_engine import maybe_run_sector_decision
+from sector_mapping import SECTOR_MAP
+
 # ============================================================
 # ENVIRONMENT VARIABLES (LOCKED)
 # ============================================================
 
 WEBAPP_URL = os.getenv("WEBAPP_URL", "").strip()
-
-FYERS_CLIENT_ID = os.getenv("FYERS_CLIENT_ID", "").strip()
-FYERS_SECRET_KEY = os.getenv("FYERS_SECRET_KEY", "").strip()
-FYERS_REDIRECT_URI = os.getenv("FYERS_REDIRECT_URI", "").strip()
 FYERS_ACCESS_TOKEN = os.getenv("FYERS_ACCESS_TOKEN", "").strip()
 
 if not WEBAPP_URL or not FYERS_ACCESS_TOKEN:
@@ -29,76 +32,64 @@ if not WEBAPP_URL or not FYERS_ACCESS_TOKEN:
 # GLOBAL STATE
 # ============================================================
 
-SETTINGS = {}
-SETTINGS_LOADED = False
+runtime = RuntimeConfig(WEBAPP_URL)
+runtime.refresh()
 
-tick_cache = {}
+pct_change_map = {}        # symbol -> %change
 ws_connected = False
+engine_started = False
 
 # ============================================================
-# SAFE TIME PARSER
+# SAFE TIME HELPERS
 # ============================================================
 
-def parse_time(val):
-    if not val:
-        return None
-    try:
-        if "T" in val:
-            return datetime.fromisoformat(val.replace("Z", "")).time()
-        if len(val.split(":")) == 2:
-            return datetime.strptime(val, "%H:%M").time()
-        return datetime.strptime(val, "%H:%M:%S").time()
-    except Exception:
-        return None
-
-
-def now_time():
-    return datetime.now().time()
+def now_dt():
+    return datetime.now()
 
 # ============================================================
-# WEBAPP COMMUNICATION (POST ONLY)
+# WEBAPP COMMUNICATION
 # ============================================================
 
 def call_webapp(action, payload=None, timeout=10):
-    if payload is None:
-        payload = {}
     try:
         return requests.post(
             WEBAPP_URL,
-            json={"action": action, "payload": payload},
+            json={"action": action, "payload": payload or {}},
             timeout=timeout
         ).json()
     except Exception:
         return None
-
-
-def load_settings():
-    global SETTINGS, SETTINGS_LOADED
-    res = call_webapp("getSettings", {})
-    if res and res.get("ok"):
-        SETTINGS = res.get("settings", {})
-        SETTINGS_LOADED = True
-        print("✅ Settings loaded from Google Sheet")
-    else:
-        print("⚠️ Settings not loaded yet")
 
 # ============================================================
 # FYERS WEBSOCKET CALLBACKS
 # ============================================================
 
 def on_message(msg):
-    symbol = msg.get("symbol")
-    ltp = msg.get("ltp")
-    vol = msg.get("vol_traded_today")
+    """
+    WS → enqueue_tick (CRITICAL FIX)
+    """
+    try:
+        symbol = msg.get("symbol")
+        ltp = msg.get("ltp")
+        volume = msg.get("vol_traded_today", 0)
+        exch_ts = msg.get("exch_feed_time")
 
-    if not symbol or ltp is None:
-        return
+        if not symbol or ltp is None or exch_ts is None:
+            return
 
-    tick_cache[symbol] = {
-        "ltp": ltp,
-        "volume": vol,
-        "time": datetime.now().isoformat()
-    }
+        enqueue_tick(
+            symbol=symbol,
+            ltp=ltp,
+            volume=volume,
+            exch_ts=exch_ts
+        )
+
+        # % change cache (for sector engine)
+        if "percent_change" in msg:
+            pct_change_map[symbol] = msg["percent_change"]
+
+    except Exception as e:
+        print("WS on_message error:", e)
 
 
 def on_connect():
@@ -108,14 +99,14 @@ def on_connect():
 
 
 def on_error(err):
-    print("❌ WS error:", err)
+    print("❌ FYERS WS error:", err)
 
 
 def on_close():
-    print("⚠️ WS closed")
+    print("⚠️ FYERS WS closed")
 
 # ============================================================
-# FYERS WS INIT (CONNECT ONLY ONCE)
+# FYERS WS INIT
 # ============================================================
 
 ws = data_ws.FyersDataSocket(
@@ -128,40 +119,44 @@ ws = data_ws.FyersDataSocket(
 )
 
 def start_ws():
-    try:
-        ws.connect()
-    except Exception as e:
-        print("WS start failed:", e)
+    ws.connect()
 
 # ============================================================
-# ENGINE LOOP (TIME DRIVEN)
+# ENGINE SUPERVISOR LOOP
 # ============================================================
 
-def engine_loop():
-    print("▶ Engine loop started")
+def supervisor_loop():
+    global engine_started
+
+    print("▶ Supervisor started")
 
     while True:
-        if not SETTINGS_LOADED:
-            time.sleep(1)
-            continue
+        runtime.refresh()
+        now = now_dt()
 
-        tick_start = parse_time(SETTINGS.get("TICK_START_TIME", "11:10:00"))
-        bias_time  = parse_time(SETTINGS.get("BIAS_TIME_INFO", "11:20:05"))
-        stop_time  = parse_time(SETTINGS.get("AUTO_SQUAREOFF_TIME", "15:15"))
+        # Start candle engine once tick window opens
+        if not engine_started and runtime.is_tick_window_open(now):
+            print("▶ Tick window open → starting candle engine")
+            init_engine(runtime, call_webapp)
+            threading.Thread(target=run_candle_engine, daemon=True).start()
+            engine_started = True
 
-        now = now_time()
-
-        if tick_start and now >= tick_start:
-            pass  # tick capture via WS
-
-        if bias_time and now >= bias_time:
-            call_webapp("pushState", {
-                "items": [{"key": "BIAS_CHECK_DONE", "value": "TRUE"}]
-            })
-
-        if stop_time and now >= stop_time:
-            print("⛔ Stop time reached")
-            break
+        # Sector decision (Phase-B trigger)
+        maybe_run_sector_decision(
+            now=now,
+            pct_change_map=pct_change_map,
+            bias_time=runtime.bias_time().strftime("%H:%M:%S"),
+            threshold=runtime.bias_threshold(),
+            max_up=runtime.max_up_percent(),
+            max_dn=runtime.max_down_percent(),
+            buy_sector_count=runtime.buy_sector_count(),
+            sell_sector_count=runtime.sell_sector_count(),
+            sector_map=SECTOR_MAP,
+            phase_b_switch=lambda syms: call_webapp(
+                "pushState",
+                {"items": [{"key": "PHASE", "value": "B"}]}
+            )
+        )
 
         time.sleep(1)
 
@@ -181,32 +176,22 @@ def ping():
 
 @app.route("/getSettings")
 def api_get_settings():
-    return jsonify({"ok": True, "settings": SETTINGS})
+    return jsonify({"ok": True, "settings": runtime.settings})
 
 @app.route("/fyers-redirect")
 def fyers_redirect():
-    status = request.args.get("s", "")
     auth_code = request.args.get("auth_code", "")
-    state = request.args.get("state", "")
-
-    return f"""
-    <h3>Fyers Redirect</h3>
-    <p>Status: {status}</p>
-    <p>State: {state}</p>
-    <textarea rows="5" cols="120">{auth_code}</textarea>
-    """
+    return f"<pre>{auth_code}</pre>"
 
 # ============================================================
 # MAIN ENTRY
 # ============================================================
 
 if __name__ == "__main__":
-    print("🚀 Starting RajanTradeAutomation")
-
-    load_settings()
+    print("🚀 Starting RajanTradeAutomation (TIME-SHIFT READY)")
 
     threading.Thread(target=start_ws, daemon=True).start()
-    threading.Thread(target=engine_loop, daemon=True).start()
+    threading.Thread(target=supervisor_loop, daemon=True).start()
 
     port = int(os.getenv("PORT", "10000"))
     app.run(host="0.0.0.0", port=port)
