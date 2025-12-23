@@ -1,18 +1,18 @@
 # ============================================================
-# RajanTradeAutomation – FINAL MAIN.PY (LOCKED & FIXED)
-# Render + Flask + FYERS WebSocket
+# RajanTradeAutomation – FINAL MAIN.PY (PRODUCTION SAFE)
+# Flask + FYERS WS + Google Sheets (WebApp.gs)
 # ============================================================
 
 import os
 import time
 import threading
-from datetime import datetime, time as dtime
+from datetime import datetime
 import requests
 from flask import Flask, request, jsonify
 from fyers_apiv3.FyersWebsocket import data_ws
 
 # ============================================================
-# ENVIRONMENT VARIABLES (DO NOT CHANGE)
+# ENVIRONMENT VARIABLES (LOCKED)
 # ============================================================
 
 WEBAPP_URL = os.getenv("WEBAPP_URL", "").strip()
@@ -36,27 +36,18 @@ tick_cache = {}
 ws_connected = False
 
 # ============================================================
-# TIME HELPERS (SAFE PARSING)
+# SAFE TIME PARSER
 # ============================================================
 
-def parse_time(value: str) -> dtime:
-    """
-    Accepts:
-    - HH:MM
-    - HH:MM:SS
-    - ISO datetime → extracts time
-    """
-    if not value:
+def parse_time(val):
+    if not val:
         return None
-
-    value = value.strip()
-
     try:
-        if "T" in value:
-            return datetime.fromisoformat(value.replace("Z", "")).time()
-        if len(value.split(":")) == 2:
-            return datetime.strptime(value, "%H:%M").time()
-        return datetime.strptime(value, "%H:%M:%S").time()
+        if "T" in val:
+            return datetime.fromisoformat(val.replace("Z", "")).time()
+        if len(val.split(":")) == 2:
+            return datetime.strptime(val, "%H:%M").time()
+        return datetime.strptime(val, "%H:%M:%S").time()
     except Exception:
         return None
 
@@ -64,36 +55,32 @@ def parse_time(value: str) -> dtime:
 def now_time():
     return datetime.now().time()
 
-
 # ============================================================
-# WEBAPP COMMUNICATION
+# WEBAPP COMMUNICATION (POST ONLY)
 # ============================================================
 
 def call_webapp(action, payload=None, timeout=10):
     if payload is None:
         payload = {}
     try:
-        requests.post(
+        return requests.post(
             WEBAPP_URL,
             json={"action": action, "payload": payload},
             timeout=timeout
-        )
+        ).json()
     except Exception:
-        pass
+        return None
 
 
 def load_settings():
     global SETTINGS, SETTINGS_LOADED
-    try:
-        r = requests.get(f"{WEBAPP_URL}?action=getSettings", timeout=10)
-        data = r.json()
-        if data.get("ok"):
-            SETTINGS = data.get("settings", {})
-            SETTINGS_LOADED = True
-            print("✔ Settings loaded")
-    except Exception as e:
-        print("Settings load failed:", e)
-
+    res = call_webapp("getSettings", {})
+    if res and res.get("ok"):
+        SETTINGS = res.get("settings", {})
+        SETTINGS_LOADED = True
+        print("✅ Settings loaded from Google Sheet")
+    else:
+        print("⚠️ Settings not loaded yet")
 
 # ============================================================
 # FYERS WEBSOCKET CALLBACKS
@@ -121,15 +108,14 @@ def on_connect():
 
 
 def on_error(err):
-    print("WS error:", err)
+    print("❌ WS error:", err)
 
 
 def on_close():
-    print("WS closed")
-
+    print("⚠️ WS closed")
 
 # ============================================================
-# FYERS WS INIT (IMPORTANT: CONNECT ONLY ONCE)
+# FYERS WS INIT (CONNECT ONLY ONCE)
 # ============================================================
 
 ws = data_ws.FyersDataSocket(
@@ -141,17 +127,14 @@ ws = data_ws.FyersDataSocket(
     reconnect=True
 )
 
-
 def start_ws():
-    # ⚠️ NO while loop here – VERY IMPORTANT
     try:
         ws.connect()
     except Exception as e:
-        print("WS start error:", e)
-
+        print("WS start failed:", e)
 
 # ============================================================
-# ENGINE LOOP (TIME SAFE)
+# ENGINE LOOP (TIME DRIVEN)
 # ============================================================
 
 def engine_loop():
@@ -162,52 +145,45 @@ def engine_loop():
             time.sleep(1)
             continue
 
-        tick_start = parse_time(SETTINGS.get("TICK_START_TIME", "10:39:00"))
-        bias_time  = parse_time(SETTINGS.get("BIAS_TIME_INFO", "10:50:05"))
+        tick_start = parse_time(SETTINGS.get("TICK_START_TIME", "11:10:00"))
+        bias_time  = parse_time(SETTINGS.get("BIAS_TIME_INFO", "11:20:05"))
         stop_time  = parse_time(SETTINGS.get("AUTO_SQUAREOFF_TIME", "15:15"))
 
         now = now_time()
 
-        # Silent tick window
         if tick_start and now >= tick_start:
-            pass  # tick collection already happening via WS
+            pass  # tick capture via WS
 
-        # Bias snapshot trigger
         if bias_time and now >= bias_time:
             call_webapp("pushState", {
                 "items": [{"key": "BIAS_CHECK_DONE", "value": "TRUE"}]
             })
 
-        # Stop engine after squareoff
         if stop_time and now >= stop_time:
             print("⛔ Stop time reached")
             break
 
         time.sleep(1)
 
-
 # ============================================================
-# FLASK APP (LOCKED BASE – DO NOT REMOVE ROUTES)
+# FLASK APP (LOCKED ROUTES)
 # ============================================================
 
 app = Flask(__name__)
 
-@app.route("/", methods=["GET"])
+@app.route("/")
 def root():
-    return "RajanTradeAutomation backend LIVE ✅", 200
+    return "RajanTradeAutomation backend LIVE ✅"
 
-
-@app.route("/ping", methods=["GET"])
+@app.route("/ping")
 def ping():
-    return "PONG", 200
+    return "PONG"
 
-
-@app.route("/getSettings", methods=["GET"])
+@app.route("/getSettings")
 def api_get_settings():
     return jsonify({"ok": True, "settings": SETTINGS})
 
-
-@app.route("/fyers-redirect", methods=["GET"])
+@app.route("/fyers-redirect")
 def fyers_redirect():
     status = request.args.get("s", "")
     auth_code = request.args.get("auth_code", "")
@@ -220,9 +196,8 @@ def fyers_redirect():
     <textarea rows="5" cols="120">{auth_code}</textarea>
     """
 
-
 # ============================================================
-# MAIN ENTRY (ORDER MATTERS)
+# MAIN ENTRY
 # ============================================================
 
 if __name__ == "__main__":
@@ -230,10 +205,7 @@ if __name__ == "__main__":
 
     load_settings()
 
-    # Start WS ONCE
     threading.Thread(target=start_ws, daemon=True).start()
-
-    # Start engine loop
     threading.Thread(target=engine_loop, daemon=True).start()
 
     port = int(os.getenv("PORT", "10000"))
