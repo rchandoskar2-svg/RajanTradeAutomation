@@ -11,8 +11,8 @@ from datetime import datetime, time as dtime
 # DEFAULTS (SAFE FALLBACKS)
 # ------------------------------------------------------------
 DEFAULTS = {
-    "TICK_START_TIME": "09:14:00",
-    "BIAS_TIME_INFO": "09:25:05",
+    "TICK_START_TIME": "10:39:00",
+    "BIAS_TIME_INFO": "10:50:05",
     "BIAS_THRESHOLD_PERCENT": "80",
     "MAX_UP_PERCENT": "2.5",
     "MAX_DOWN_PERCENT": "-2.5",
