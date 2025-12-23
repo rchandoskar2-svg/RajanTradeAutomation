@@ -1,6 +1,6 @@
 # ============================================================
-# RajanTradeAutomation – FINAL MAIN.PY (PRODUCTION SAFE)
-# FIXED: WS SUBSCRIBE + TIME SHIFT READY
+# RajanTradeAutomation – FINAL MAIN.PY (ABSOLUTE FIX)
+# FYERS WS + SUBSCRIBE + KEEP_RUNNING + TIME-SHIFT SAFE
 # ============================================================
 
 import os
@@ -18,17 +18,17 @@ from sector_engine import maybe_run_sector_decision
 from sector_mapping import SECTOR_MAP
 
 # ============================================================
-# ENV
+# ENVIRONMENT VARIABLES
 # ============================================================
 
 WEBAPP_URL = os.getenv("WEBAPP_URL", "").strip()
 FYERS_ACCESS_TOKEN = os.getenv("FYERS_ACCESS_TOKEN", "").strip()
 
 if not WEBAPP_URL or not FYERS_ACCESS_TOKEN:
-    raise Exception("Missing ENV vars")
+    raise Exception("Missing WEBAPP_URL or FYERS_ACCESS_TOKEN")
 
 # ============================================================
-# GLOBALS
+# GLOBAL STATE
 # ============================================================
 
 runtime = RuntimeConfig(WEBAPP_URL)
@@ -39,7 +39,7 @@ engine_started = False
 ws_connected = False
 
 # ============================================================
-# WEBAPP
+# WEBAPP CALL
 # ============================================================
 
 def call_webapp(action, payload=None):
@@ -53,7 +53,7 @@ def call_webapp(action, payload=None):
         return None
 
 # ============================================================
-# WS CALLBACKS
+# FYERS WS CALLBACKS
 # ============================================================
 
 def on_message(msg):
@@ -72,7 +72,7 @@ def on_message(msg):
             pct_change_map[symbol] = msg["percent_change"]
 
     except Exception as e:
-        print("on_message error:", e)
+        print("❌ on_message error:", e)
 
 
 def on_connect():
@@ -80,13 +80,12 @@ def on_connect():
     ws_connected = True
     print("✅ FYERS WS connected")
 
-    # 🔥🔥🔥 THIS IS THE MISSING PIECE 🔥🔥🔥
+    # -------- SUBSCRIBE (MANDATORY) --------
     symbols = []
     for lst in SECTOR_MAP.values():
         symbols.extend(lst)
 
-    symbols = list(set(symbols))  # unique ~165–170
-
+    symbols = list(set(symbols))
     print(f"▶ Subscribing to {len(symbols)} symbols")
 
     ws.subscribe(
@@ -96,14 +95,14 @@ def on_connect():
 
 
 def on_error(err):
-    print("❌ WS error:", err)
+    print("❌ FYERS WS error:", err)
 
 
 def on_close():
-    print("⚠️ WS closed")
+    print("⚠️ FYERS WS closed")
 
 # ============================================================
-# WS INIT
+# FYERS WS INIT
 # ============================================================
 
 ws = data_ws.FyersDataSocket(
@@ -117,9 +116,10 @@ ws = data_ws.FyersDataSocket(
 
 def start_ws():
     ws.connect()
+    ws.keep_running()   # 🔥 THIS WAS THE ROOT CAUSE
 
 # ============================================================
-# SUPERVISOR
+# SUPERVISOR LOOP
 # ============================================================
 
 def supervisor():
@@ -131,58 +131,6 @@ def supervisor():
         runtime.refresh()
         now = datetime.now()
 
+        # Start candle engine after tick window opens
         if not engine_started and runtime.is_tick_window_open(now):
-            print("▶ Tick window open → starting candle engine")
-            init_engine(runtime, call_webapp)
-            threading.Thread(target=run_candle_engine, daemon=True).start()
-            engine_started = True
-
-        maybe_run_sector_decision(
-            now=now,
-            pct_change_map=pct_change_map,
-            bias_time=runtime.bias_time().strftime("%H:%M:%S"),
-            threshold=runtime.bias_threshold(),
-            max_up=runtime.max_up_percent(),
-            max_dn=runtime.max_down_percent(),
-            buy_sector_count=runtime.buy_sector_count(),
-            sell_sector_count=runtime.sell_sector_count(),
-            sector_map=SECTOR_MAP,
-            phase_b_switch=lambda syms: print(f"▶ Phase-B symbols: {len(syms)}")
-        )
-
-        time.sleep(1)
-
-# ============================================================
-# FLASK
-# ============================================================
-
-app = Flask(__name__)
-
-@app.route("/")
-def root():
-    return "RajanTradeAutomation LIVE ✅"
-
-@app.route("/ping")
-def ping():
-    return "PONG"
-
-@app.route("/getSettings")
-def get_settings():
-    return jsonify({"ok": True, "settings": runtime.settings})
-
-@app.route("/fyers-redirect")
-def fyers_redirect():
-    return "<pre>Auth OK</pre>"
-
-# ============================================================
-# MAIN
-# ============================================================
-
-if __name__ == "__main__":
-    print("🚀 Starting RajanTradeAutomation (FINAL FIX)")
-
-    threading.Thread(target=start_ws, daemon=True).start()
-    threading.Thread(target=supervisor, daemon=True).start()
-
-    port = int(os.getenv("PORT", "10000"))
-    app.run(host="0.0.0.0", port=port)
+            print("▶ Tic
