@@ -1,32 +1,48 @@
 # ============================================================
 # config_runtime.py
-# Single source of truth for ALL timings
+# Runtime settings loader (NO fallback, env mandatory)
 # ============================================================
 
+import os
 import requests
-from datetime import datetime
-
-SETTINGS_URL = "YOUR_WEBAPP_URL?action=getSettings"
+from datetime import datetime, time as dtime
 
 class RuntimeConfig:
     def __init__(self):
-        self.reload()
+        self.webapp_url = os.getenv("WEBAPP_URL")
+        if not self.webapp_url:
+            raise RuntimeError("WEBAPP_URL env variable missing")
 
-    def reload(self):
-        data = requests.get(SETTINGS_URL, timeout=5).json()
+        self.settings = {}
+        self.last_fetch = None
 
-        self.tick_start_time = data.get("TICK_START_TIME", "09:15:00")
-        self.bias_time = data.get("BIAS_TIME", "09:25:05")
-        self.candle_interval = int(data.get("CANDLE_INTERVAL", 300))
+    def refresh(self):
+        try:
+            r = requests.post(
+                self.webapp_url,
+                json={"action": "getSettings"},
+                timeout=5
+            )
+            r.raise_for_status()
+            self.settings = r.json().get("settings", {})
+            self.last_fetch = datetime.now()
+        except Exception as e:
+            print("⚠️ Settings fetch failed:", e)
 
-    def now_str(self):
-        return datetime.now().strftime("%H:%M:%S")
+    def _get(self, key, default=None):
+        return self.settings.get(key, default)
 
-    def tick_allowed(self):
-        return self.now_str() >= self.tick_start_time
+    def _time(self, key):
+        v = self._get(key)
+        h, m, s = map(int, v.split(":"))
+        return dtime(h, m, s)
 
-    def bias_allowed(self):
-        return self.now_str() >= self.bias_time
+    # ---- PUBLIC ----
+    def tick_start_time(self):
+        return self._time("TICK_START_TIME")
 
+    def bias_time(self):
+        return self._time("BIAS_TIME")
 
-RUNTIME = RuntimeConfig()
+    def bias_threshold(self):
+        return float(self._get("BIAS_THRESHOLD_PERCENT", 80))
