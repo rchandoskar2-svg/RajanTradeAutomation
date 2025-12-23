@@ -162,8 +162,8 @@ def engine_loop():
             time.sleep(1)
             continue
 
-        tick_start = parse_time(SETTINGS.get("TICK_START_TIME", "09:14:00"))
-        bias_time  = parse_time(SETTINGS.get("BIAS_TIME_INFO", "09:25:05"))
+        tick_start = parse_time(SETTINGS.get("TICK_START_TIME", "10:39:00"))
+        bias_time  = parse_time(SETTINGS.get("BIAS_TIME_INFO", "10:50:05"))
         stop_time  = parse_time(SETTINGS.get("AUTO_SQUAREOFF_TIME", "15:15"))
 
         now = now_time()
