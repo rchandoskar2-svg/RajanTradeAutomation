@@ -44,7 +44,9 @@ def health():
         "service": "RajanTradeAutomation"
     })
 
-# ✅ REQUIRED FOR FYERS AUTH FLOW
+# ------------------------------------------------------------
+# FYERS CALLBACK (OLD – KEEP AS IS)
+# ------------------------------------------------------------
 @app.route("/callback")
 def fyers_callback():
     auth_code = request.args.get("auth_code")
@@ -57,6 +59,35 @@ def fyers_callback():
         "status": "callback_received",
         "auth_code": auth_code
     })
+
+# ------------------------------------------------------------
+# FYERS REDIRECT URI (REQUIRED – NEW)
+# ------------------------------------------------------------
+@app.route("/fyers-redirect", methods=["GET"])
+def fyers_redirect():
+    try:
+        # FYERS कधी auth_code तर कधी code पाठवतो
+        auth_code = request.args.get("auth_code") or request.args.get("code")
+        state = request.args.get("state")
+
+        print("🔑 FYERS REDIRECT HIT")
+        print("AUTH CODE =", auth_code)
+        print("STATE =", state)
+
+        if not auth_code:
+            return jsonify({"error": "auth_code missing"}), 400
+
+        return jsonify({
+            "status": "redirect_received",
+            "auth_code": auth_code,
+            "state": state
+        })
+
+    except Exception as e:
+        return jsonify({
+            "status": "error",
+            "message": str(e)
+        }), 500
 
 # ------------------------------------------------------------
 # FYERS WebSocket
@@ -129,10 +160,7 @@ def update_candle_from_tick(msg):
 # WebSocket Callbacks
 # ------------------------------------------------------------
 def on_message(message):
-    # 🔒 EXISTING BEHAVIOUR (UNCHANGED)
     print("📩 WS MESSAGE:", message)
-
-    # 🔹 EXACT LOCAL CANDLE LOGIC
     try:
         update_candle_from_tick(message)
     except Exception as e:
