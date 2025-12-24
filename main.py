@@ -1,11 +1,14 @@
 # ============================================================
 # RajanTradeAutomation – main.py (Render Stable WS Version)
-# Tick SILENT | Counting ON | 5m Candle ON | Cum-Vol Diff ON
+# FIXED: setuptools<81, FYERS WS, Render-safe threading
+# + FYERS CALLBACK URI ROUTE
+# + LOCAL-PROVEN 5-MIN CANDLE BUILD (CUM VOL BASED)
 # ============================================================
 
 import os
 import time
 import threading
+from datetime import datetime
 from flask import Flask, jsonify, request
 
 # ------------------------------------------------------------
@@ -30,7 +33,7 @@ if not FYERS_CLIENT_ID or not FYERS_ACCESS_TOKEN:
     raise Exception("❌ FYERS ENV variables missing")
 
 # ------------------------------------------------------------
-# Flask App (PING + FYERS ROUTES)
+# Flask App (Render keep-alive + FYERS redirect)
 # ------------------------------------------------------------
 app = Flask(__name__)
 
@@ -41,34 +44,50 @@ def health():
         "service": "RajanTradeAutomation"
     })
 
+# ------------------------------------------------------------
+# FYERS CALLBACK (OLD – KEEP AS IS)
+# ------------------------------------------------------------
 @app.route("/callback")
 def fyers_callback():
     auth_code = request.args.get("auth_code")
     print("🔑 FYERS CALLBACK HIT | AUTH CODE =", auth_code)
+
     if not auth_code:
         return jsonify({"error": "auth_code missing"}), 400
+
     return jsonify({
         "status": "callback_received",
         "auth_code": auth_code
     })
 
+# ------------------------------------------------------------
+# FYERS REDIRECT URI (REQUIRED – NEW)
+# ------------------------------------------------------------
 @app.route("/fyers-redirect", methods=["GET"])
 def fyers_redirect():
-    auth_code = request.args.get("auth_code") or request.args.get("code")
-    state = request.args.get("state")
+    try:
+        # FYERS कधी auth_code तर कधी code पाठवतो
+        auth_code = request.args.get("auth_code") or request.args.get("code")
+        state = request.args.get("state")
 
-    print("🔑 FYERS REDIRECT HIT")
-    print("AUTH CODE =", auth_code)
-    print("STATE =", state)
+        print("🔑 FYERS REDIRECT HIT")
+        print("AUTH CODE =", auth_code)
+        print("STATE =", state)
 
-    if not auth_code:
-        return jsonify({"error": "auth_code missing"}), 400
+        if not auth_code:
+            return jsonify({"error": "auth_code missing"}), 400
 
-    return jsonify({
-        "status": "redirect_received",
-        "auth_code": auth_code,
-        "state": state
-    })
+        return jsonify({
+            "status": "redirect_received",
+            "auth_code": auth_code,
+            "state": state
+        })
+
+    except Exception as e:
+        return jsonify({
+            "status": "error",
+            "message": str(e)
+        }), 500
 
 # ------------------------------------------------------------
 # FYERS WebSocket
@@ -78,7 +97,7 @@ from fyers_apiv3.FyersWebsocket import data_ws
 print("✅ data_ws IMPORT SUCCESS")
 
 # ------------------------------------------------------------
-# 5-MIN CANDLE ENGINE (CUM VOL BASED)
+# 5-MIN CANDLE ENGINE (LOCAL-PROVEN LOGIC)
 # ------------------------------------------------------------
 CANDLE_INTERVAL = 300  # 5 minutes
 
@@ -97,8 +116,7 @@ def close_candle(symbol, c):
         f"\n🟩 5m CANDLE {symbol}"
         f"\nTime : {time.strftime('%H:%M:%S', time.localtime(c['start']))}"
         f"\nO:{c['open']} H:{c['high']} L:{c['low']} "
-        f"C:{c['close']}"
-        f"\nCumVol:{c['cum_vol']} | 5mVol:{candle_volume}"
+        f"C:{c['close']} V:{candle_volume}"
         f"\n---------------------------"
     )
 
@@ -139,17 +157,12 @@ def update_candle_from_tick(msg):
     c["cum_vol"] = vol
 
 # ------------------------------------------------------------
-# WebSocket Callbacks (FIXED)
+# WebSocket Callbacks
 # ------------------------------------------------------------
 def on_message(message):
-    # 🔕 Tick print बंद, पण counting ON
+    print("📩 WS MESSAGE:", message)
     try:
-        # FYERS कधी list तर कधी dict पाठवतो
-        if isinstance(message, list):
-            for tick in message:
-                update_candle_from_tick(tick)
-        elif isinstance(message, dict):
-            update_candle_from_tick(message)
+        update_candle_from_tick(message)
     except Exception as e:
         print("🔥 Candle logic error:", e)
 
