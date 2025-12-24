@@ -3,3 +3,4 @@ requests
 fyers-apiv3
 setuptools<81
 nsetools
+pytz
