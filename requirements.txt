@@ -1,6 +1,5 @@
 flask
 requests
 fyers-apiv3
-pytz
 setuptools<81
 nsetools
