@@ -1,5 +1,6 @@
 # ============================================================
 # RajanTradeAutomation – main.py (Render Stable WS Version)
+# SILENT TICK MODE ENABLED
 # FIXED: setuptools<81, FYERS WS, Render-safe threading
 # + FYERS CALLBACK URI ROUTE
 # + LOCAL-PROVEN 5-MIN CANDLE BUILD (CUM VOL BASED)
@@ -61,12 +62,11 @@ def fyers_callback():
     })
 
 # ------------------------------------------------------------
-# FYERS REDIRECT URI (REQUIRED – NEW)
+# FYERS REDIRECT URI (REQUIRED)
 # ------------------------------------------------------------
 @app.route("/fyers-redirect", methods=["GET"])
 def fyers_redirect():
     try:
-        # FYERS कधी auth_code तर कधी code पाठवतो
         auth_code = request.args.get("auth_code") or request.args.get("code")
         state = request.args.get("state")
 
@@ -101,8 +101,12 @@ print("✅ data_ws IMPORT SUCCESS")
 # ------------------------------------------------------------
 CANDLE_INTERVAL = 300  # 5 minutes
 
-candles = {}          # symbol -> current candle
-last_candle_vol = {}  # symbol -> last candle cumulative volume
+candles = {}
+last_candle_vol = {}
+
+# Tick counter (silent mode)
+tick_count = 0
+last_tick_log = time.time()
 
 def get_candle_start(ts):
     return ts - (ts % CANDLE_INTERVAL)
@@ -135,7 +139,6 @@ def update_candle_from_tick(msg):
     candle_start = get_candle_start(ts)
     c = candles.get(symbol)
 
-    # NEW CANDLE
     if c is None or c["start"] != candle_start:
         if c:
             close_candle(symbol, c)
@@ -150,17 +153,23 @@ def update_candle_from_tick(msg):
         }
         return
 
-    # UPDATE RUNNING CANDLE
     c["high"] = max(c["high"], ltp)
     c["low"] = min(c["low"], ltp)
     c["close"] = ltp
     c["cum_vol"] = vol
 
 # ------------------------------------------------------------
-# WebSocket Callbacks
+# WebSocket Callbacks (SILENT TICKS)
 # ------------------------------------------------------------
 def on_message(message):
-    print("📩 WS MESSAGE:", message)
+    global tick_count, last_tick_log
+    tick_count += 1
+
+    # Optional: heartbeat every 30 seconds (NOT every tick)
+    if time.time() - last_tick_log > 30:
+        print(f"📊 TICKS RECEIVED: {tick_count}")
+        last_tick_log = time.time()
+
     try:
         update_candle_from_tick(message)
     except Exception as e:
