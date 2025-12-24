@@ -1,19 +1,19 @@
 # ============================================================
 # RajanTradeAutomation – main.py (Render Stable WS Version)
-# SILENT TICK MODE ENABLED
+# SILENT TICK MODE (NO SKIP)
 # FIXED: setuptools<81, FYERS WS, Render-safe threading
-# + FYERS CALLBACK URI ROUTE
-# + LOCAL-PROVEN 5-MIN CANDLE BUILD (CUM VOL BASED)
+# + FYERS REDIRECT URI
+# + PING ROUTE
+# + LOCAL-PROVEN 5-MIN CANDLE BUILD
 # ============================================================
 
 import os
 import time
 import threading
-from datetime import datetime
 from flask import Flask, jsonify, request
 
 # ------------------------------------------------------------
-# Basic Logs
+# Startup Log
 # ------------------------------------------------------------
 print("🚀 main.py STARTED")
 
@@ -25,102 +25,70 @@ FYERS_ACCESS_TOKEN = os.getenv("FYERS_ACCESS_TOKEN")
 
 print("🔍 ENV CHECK")
 print("FYERS_CLIENT_ID =", FYERS_CLIENT_ID)
-print(
-    "FYERS_ACCESS_TOKEN prefix =",
-    FYERS_ACCESS_TOKEN[:20] if FYERS_ACCESS_TOKEN else "❌ MISSING"
-)
+print("FYERS_ACCESS_TOKEN prefix =", FYERS_ACCESS_TOKEN[:15] if FYERS_ACCESS_TOKEN else "❌ MISSING")
 
 if not FYERS_CLIENT_ID or not FYERS_ACCESS_TOKEN:
     raise Exception("❌ FYERS ENV variables missing")
 
 # ------------------------------------------------------------
-# Flask App (Render keep-alive + FYERS redirect)
+# Flask App
 # ------------------------------------------------------------
 app = Flask(__name__)
 
 @app.route("/")
 def health():
-    return jsonify({
-        "status": "ok",
-        "service": "RajanTradeAutomation"
-    })
+    return jsonify({"status": "ok", "service": "RajanTradeAutomation"})
+
+@app.route("/ping")
+def ping():
+    return "pong", 200
 
 # ------------------------------------------------------------
-# FYERS CALLBACK (OLD – KEEP AS IS)
+# FYERS REDIRECT URI
 # ------------------------------------------------------------
-@app.route("/callback")
-def fyers_callback():
-    auth_code = request.args.get("auth_code")
-    print("🔑 FYERS CALLBACK HIT | AUTH CODE =", auth_code)
+@app.route("/fyers-redirect", methods=["GET"])
+def fyers_redirect():
+    auth_code = request.args.get("auth_code") or request.args.get("code")
+    state = request.args.get("state")
+
+    print("🔑 FYERS REDIRECT HIT")
+    print("AUTH CODE =", auth_code)
 
     if not auth_code:
         return jsonify({"error": "auth_code missing"}), 400
 
     return jsonify({
-        "status": "callback_received",
-        "auth_code": auth_code
+        "status": "redirect_received",
+        "auth_code": auth_code,
+        "state": state
     })
-
-# ------------------------------------------------------------
-# FYERS REDIRECT URI (REQUIRED)
-# ------------------------------------------------------------
-@app.route("/fyers-redirect", methods=["GET"])
-def fyers_redirect():
-    try:
-        auth_code = request.args.get("auth_code") or request.args.get("code")
-        state = request.args.get("state")
-
-        print("🔑 FYERS REDIRECT HIT")
-        print("AUTH CODE =", auth_code)
-        print("STATE =", state)
-
-        if not auth_code:
-            return jsonify({"error": "auth_code missing"}), 400
-
-        return jsonify({
-            "status": "redirect_received",
-            "auth_code": auth_code,
-            "state": state
-        })
-
-    except Exception as e:
-        return jsonify({
-            "status": "error",
-            "message": str(e)
-        }), 500
 
 # ------------------------------------------------------------
 # FYERS WebSocket
 # ------------------------------------------------------------
-print("📦 Importing fyers_apiv3 WebSocket")
 from fyers_apiv3.FyersWebsocket import data_ws
-print("✅ data_ws IMPORT SUCCESS")
+print("✅ data_ws IMPORTED")
 
 # ------------------------------------------------------------
-# 5-MIN CANDLE ENGINE (LOCAL-PROVEN LOGIC)
+# 5-MIN CANDLE ENGINE (STRICT)
 # ------------------------------------------------------------
-CANDLE_INTERVAL = 300  # 5 minutes
+CANDLE_INTERVAL = 300
 
 candles = {}
 last_candle_vol = {}
-
-# Tick counter (silent mode)
-tick_count = 0
-last_tick_log = time.time()
 
 def get_candle_start(ts):
     return ts - (ts % CANDLE_INTERVAL)
 
 def close_candle(symbol, c):
     prev_vol = last_candle_vol.get(symbol, c["cum_vol"])
-    candle_volume = c["cum_vol"] - prev_vol
+    candle_vol = c["cum_vol"] - prev_vol
     last_candle_vol[symbol] = c["cum_vol"]
 
     print(
         f"\n🟩 5m CANDLE {symbol}"
         f"\nTime : {time.strftime('%H:%M:%S', time.localtime(c['start']))}"
-        f"\nO:{c['open']} H:{c['high']} L:{c['low']} "
-        f"C:{c['close']} V:{candle_volume}"
+        f"\nO:{c['open']} H:{c['high']} L:{c['low']} C:{c['close']} V:{candle_vol}"
         f"\n---------------------------"
     )
 
@@ -136,15 +104,15 @@ def update_candle_from_tick(msg):
     if not symbol or ltp is None or vol is None or ts is None:
         return
 
-    candle_start = get_candle_start(ts)
+    start = get_candle_start(ts)
     c = candles.get(symbol)
 
-    if c is None or c["start"] != candle_start:
+    if c is None or c["start"] != start:
         if c:
             close_candle(symbol, c)
 
         candles[symbol] = {
-            "start": candle_start,
+            "start": start,
             "open": ltp,
             "high": ltp,
             "low": ltp,
@@ -159,17 +127,9 @@ def update_candle_from_tick(msg):
     c["cum_vol"] = vol
 
 # ------------------------------------------------------------
-# WebSocket Callbacks (SILENT TICKS)
+# WebSocket Callbacks (NO TICK PRINT, NO SKIP)
 # ------------------------------------------------------------
 def on_message(message):
-    global tick_count, last_tick_log
-    tick_count += 1
-
-    # Optional: heartbeat every 30 seconds (NOT every tick)
-    if time.time() - last_tick_log > 30:
-        print(f"📊 TICKS RECEIVED: {tick_count}")
-        last_tick_log = time.time()
-
     try:
         update_candle_from_tick(message)
     except Exception as e:
@@ -179,7 +139,7 @@ def on_error(message):
     print("❌ WS ERROR:", message)
 
 def on_close(message):
-    print("🔌 WS CLOSED:", message)
+    print("🔌 WS CLOSED")
 
 def on_connect():
     print("🔗 WS CONNECTED")
@@ -192,47 +152,30 @@ def on_connect():
         "NSE:KOTAKBANK-EQ"
     ]
 
-    print("📡 Subscribing symbols:", symbols)
-
-    fyers_ws.subscribe(
-        symbols=symbols,
-        data_type="SymbolUpdate"
-    )
+    fyers_ws.subscribe(symbols=symbols, data_type="SymbolUpdate")
+    print("📡 SUBSCRIBED:", symbols)
 
 # ------------------------------------------------------------
-# Start WebSocket (NON-BLOCKING)
+# Start WS Thread
 # ------------------------------------------------------------
 def start_ws():
-    try:
-        print("🧵 WS THREAD STARTED")
+    global fyers_ws
+    fyers_ws = data_ws.FyersDataSocket(
+        access_token=FYERS_ACCESS_TOKEN,
+        on_message=on_message,
+        on_error=on_error,
+        on_close=on_close,
+        on_connect=on_connect,
+        reconnect=True
+    )
+    fyers_ws.connect()
 
-        global fyers_ws
-        fyers_ws = data_ws.FyersDataSocket(
-            access_token=FYERS_ACCESS_TOKEN,
-            on_message=on_message,
-            on_error=on_error,
-            on_close=on_close,
-            on_connect=on_connect,
-            reconnect=True
-        )
-
-        print("✅ FyersDataSocket CREATED")
-        fyers_ws.connect()
-        print("📶 WS CONNECT CALLED")
-
-    except Exception as e:
-        print("🔥 WS THREAD CRASHED:", e)
+threading.Thread(target=start_ws, daemon=True).start()
 
 # ------------------------------------------------------------
-# Launch WS in daemon thread
-# ------------------------------------------------------------
-ws_thread = threading.Thread(target=start_ws, daemon=True)
-ws_thread.start()
-
-# ------------------------------------------------------------
-# Start Flask (MAIN THREAD)
+# Start Flask
 # ------------------------------------------------------------
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
-    print(f"🌐 Starting Flask on port {port}")
+    print(f"🌐 Flask starting on port {port}")
     app.run(host="0.0.0.0", port=port)
