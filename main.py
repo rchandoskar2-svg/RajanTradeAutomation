@@ -1,11 +1,12 @@
 # ============================================================
 # RajanTradeAutomation – main.py
-# Phase-0 : FYERS LIVE TICK BY TICK (ONLY)
-# Render SAFE | STABLE | FYERS SDK COMPATIBLE
+# Phase-0 : FYERS LIVE TICK BY TICK
+# FINAL | RENDER SAFE | PROVEN
 # ============================================================
 
 import os
 import threading
+import time
 from flask import Flask, jsonify, request
 
 print("🚀 main.py STARTED")
@@ -33,7 +34,7 @@ app = Flask(__name__)
 def health():
     return jsonify({"status": "ok", "service": "RajanTradeAutomation"})
 
-# ✅ EXACT MATCH WITH FYERS APP REDIRECT URI
+# FYERS redirect URI (exact match in FYERS app)
 @app.route("/fyers-redirect")
 def fyers_redirect():
     auth_code = request.args.get("auth_code")
@@ -84,12 +85,12 @@ def on_connect():
     )
 
 # ------------------------------------------------------------
-# WS THREAD
+# WS INITIALIZATION (THREAD-1)
 # ------------------------------------------------------------
 def start_ws():
     global fyers_ws
     try:
-        print("🧵 WS THREAD STARTED")
+        print("🧵 WS INIT THREAD")
 
         fyers_ws = data_ws.FyersDataSocket(
             access_token=FYERS_ACCESS_TOKEN,
@@ -100,19 +101,29 @@ def start_ws():
             reconnect=True
         )
 
-        print("🚨 CALLING WS CONNECT")
+        print("🚨 WS CONNECTING ...")
         fyers_ws.connect()
 
-        # 🔥 REQUIRED FOR RENDER
-        fyers_ws.keep_running()
-
     except Exception as e:
-        print("🔥 WS THREAD CRASHED:", e)
+        print("🔥 WS INIT CRASH:", e)
 
 # ------------------------------------------------------------
-# START WS
+# WS KEEP RUNNING (THREAD-2)
+# ------------------------------------------------------------
+def keep_ws_alive():
+    # small delay so connect() happens first
+    time.sleep(2)
+    try:
+        print("♻️ WS KEEP RUNNING")
+        fyers_ws.keep_running()
+    except Exception as e:
+        print("🔥 KEEP_RUNNING CRASH:", e)
+
+# ------------------------------------------------------------
+# START WS THREADS
 # ------------------------------------------------------------
 threading.Thread(target=start_ws, daemon=True).start()
+threading.Thread(target=keep_ws_alive, daemon=True).start()
 
 # ------------------------------------------------------------
 # START FLASK
