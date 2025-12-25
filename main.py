@@ -2,12 +2,14 @@
 # RajanTradeAutomation – main.py
 # Phase-0 : FYERS LIVE TICK BY TICK
 # FINAL | RENDER SAFE | PROVEN
+# + TEST SECTOR BIAS ROUTE
 # ============================================================
 
 import os
 import threading
 import time
 from flask import Flask, jsonify, request
+from datetime import datetime
 
 print("🚀 main.py STARTED")
 
@@ -34,7 +36,6 @@ app = Flask(__name__)
 def health():
     return jsonify({"status": "ok", "service": "RajanTradeAutomation"})
 
-# FYERS redirect URI (exact match in FYERS app)
 @app.route("/fyers-redirect")
 def fyers_redirect():
     auth_code = request.args.get("auth_code")
@@ -66,21 +67,21 @@ def on_error(message):
 def on_close(message):
     print("🔌 WS CLOSED:", message)
 
+# --- CURRENT 5 STOCK UNIVERSE ---
+SUBSCRIBED_SYMBOLS = [
+    "NSE:SBIN-EQ",
+    "NSE:RELIANCE-EQ",
+    "NSE:VEDL-EQ",
+    "NSE:AXISBANK-EQ",
+    "NSE:KOTAKBANK-EQ"
+]
+
 def on_connect():
     print("🔗 WS CONNECTED")
-
-    symbols = [
-        "NSE:SBIN-EQ",
-        "NSE:RELIANCE-EQ",
-        "NSE:VEDL-EQ",
-        "NSE:AXISBANK-EQ",
-        "NSE:KOTAKBANK-EQ"
-    ]
-
-    print("📡 Subscribing symbols:", symbols)
+    print("📡 Subscribing symbols:", SUBSCRIBED_SYMBOLS)
 
     fyers_ws.subscribe(
-        symbols=symbols,
+        symbols=SUBSCRIBED_SYMBOLS,
         data_type="SymbolUpdate"
     )
 
@@ -111,7 +112,6 @@ def start_ws():
 # WS KEEP RUNNING (THREAD-2)
 # ------------------------------------------------------------
 def keep_ws_alive():
-    # small delay so connect() happens first
     time.sleep(2)
     try:
         print("♻️ WS KEEP RUNNING")
@@ -119,11 +119,41 @@ def keep_ws_alive():
     except Exception as e:
         print("🔥 KEEP_RUNNING CRASH:", e)
 
-# ------------------------------------------------------------
-# START WS THREADS
-# ------------------------------------------------------------
 threading.Thread(target=start_ws, daemon=True).start()
 threading.Thread(target=keep_ws_alive, daemon=True).start()
+
+# ------------------------------------------------------------
+# 🔍 TEST SECTOR BIAS ROUTE (DRY RUN)
+# ------------------------------------------------------------
+from sector_engine import run_sector_bias
+
+SECTOR_LINKS = {
+    "NIFTY AUTO": "https://www.nseindia.com/market-data/live-equity-market?symbol=NIFTY%20AUTO",
+    "NIFTY FMCG": "https://www.nseindia.com/market-data/live-equity-market?symbol=NIFTY%20FMCG",
+    "NIFTY IT": "https://www.nseindia.com/market-data/live-equity-market?symbol=NIFTY%20IT",
+    "NIFTY METAL": "https://www.nseindia.com/market-data/live-equity-market?symbol=NIFTY%20METAL",
+    "NIFTY PHARMA": "https://www.nseindia.com/market-data/live-equity-market?symbol=NIFTY%20PHARMA"
+}
+
+@app.route("/test-sector-bias")
+def test_sector_bias():
+    start_time = datetime.now().strftime("%H:%M:%S")
+
+    strong_sectors, selected = run_sector_bias(SECTOR_LINKS)
+
+    all_symbols = {s.split(":")[1].replace("-EQ", "") for s in SUBSCRIBED_SYMBOLS}
+    selected_set = set(selected)
+    drop_preview = sorted(all_symbols - selected_set)
+
+    return jsonify({
+        "test_time": start_time,
+        "current_universe_size": len(all_symbols),
+        "strong_sectors": strong_sectors,
+        "selected_stocks": selected,
+        "selected_count": len(selected),
+        "unsubscribe_preview": drop_preview,
+        "note": "DRY RUN ONLY – NO WS UNSUBSCRIBE EXECUTED"
+    })
 
 # ------------------------------------------------------------
 # START FLASK
