@@ -1,7 +1,7 @@
 # ============================================================
 # RajanTradeAutomation – main.py
 # Phase-0 : FYERS LIVE TICK BY TICK (ONLY)
-# Render SAFE | MINIMAL | STABLE | FIXED
+# Render SAFE | STABLE | FYERS SDK COMPATIBLE
 # ============================================================
 
 import os
@@ -13,18 +13,16 @@ print("🚀 main.py STARTED")
 # ------------------------------------------------------------
 # ENV CHECK
 # ------------------------------------------------------------
-FYERS_CLIENT_ID = os.getenv("FYERS_CLIENT_ID")
 FYERS_ACCESS_TOKEN = os.getenv("FYERS_ACCESS_TOKEN")
 
 print("🔍 ENV CHECK")
-print("FYERS_CLIENT_ID =", FYERS_CLIENT_ID)
 print(
     "FYERS_ACCESS_TOKEN prefix =",
     FYERS_ACCESS_TOKEN[:20] if FYERS_ACCESS_TOKEN else "❌ MISSING"
 )
 
-if not FYERS_CLIENT_ID or not FYERS_ACCESS_TOKEN:
-    raise Exception("❌ FYERS ENV variables missing")
+if not FYERS_ACCESS_TOKEN:
+    raise Exception("❌ FYERS_ACCESS_TOKEN missing")
 
 # ------------------------------------------------------------
 # Flask App (PING + FYERS REDIRECT)
@@ -35,7 +33,7 @@ app = Flask(__name__)
 def health():
     return jsonify({"status": "ok", "service": "RajanTradeAutomation"})
 
-# 🔥 IMPORTANT: EXACT MATCH WITH FYERS REDIRECT URI
+# ✅ EXACT MATCH WITH FYERS APP REDIRECT URI
 @app.route("/fyers-redirect")
 def fyers_redirect():
     auth_code = request.args.get("auth_code")
@@ -95,7 +93,6 @@ def start_ws():
 
         fyers_ws = data_ws.FyersDataSocket(
             access_token=FYERS_ACCESS_TOKEN,
-            client_id=FYERS_CLIENT_ID,   # 🔥 CRITICAL FIX
             on_message=on_message,
             on_error=on_error,
             on_close=on_close,
@@ -113,7 +110,7 @@ def start_ws():
         print("🔥 WS THREAD CRASHED:", e)
 
 # ------------------------------------------------------------
-# START WS (BEFORE FLASK)
+# START WS
 # ------------------------------------------------------------
 threading.Thread(target=start_ws, daemon=True).start()
 
