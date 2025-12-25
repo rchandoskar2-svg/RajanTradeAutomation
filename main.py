@@ -1,7 +1,7 @@
 # ============================================================
 # RajanTradeAutomation – main.py
 # Phase-0 : FYERS LIVE TICK BY TICK (ONLY)
-# Render SAFE | MINIMAL | STABLE
+# Render SAFE | MINIMAL | STABLE | FIXED
 # ============================================================
 
 import os
@@ -27,7 +27,7 @@ if not FYERS_CLIENT_ID or not FYERS_ACCESS_TOKEN:
     raise Exception("❌ FYERS ENV variables missing")
 
 # ------------------------------------------------------------
-# Flask App (PING + CALLBACK)
+# Flask App (PING + FYERS REDIRECT)
 # ------------------------------------------------------------
 app = Flask(__name__)
 
@@ -35,11 +35,12 @@ app = Flask(__name__)
 def health():
     return jsonify({"status": "ok", "service": "RajanTradeAutomation"})
 
-@app.route("/callback")
-def fyers_callback():
+# 🔥 IMPORTANT: EXACT MATCH WITH FYERS REDIRECT URI
+@app.route("/fyers-redirect")
+def fyers_redirect():
     auth_code = request.args.get("auth_code")
-    print("🔑 FYERS CALLBACK HIT | AUTH CODE =", auth_code)
-    return jsonify({"status": "callback_received"})
+    print("🔑 FYERS REDIRECT HIT | AUTH CODE =", auth_code)
+    return jsonify({"status": "fyers_redirect_received"})
 
 # ------------------------------------------------------------
 # FYERS WebSocket
@@ -52,10 +53,6 @@ print("✅ data_ws IMPORT SUCCESS")
 # WS CALLBACKS
 # ------------------------------------------------------------
 def on_message(message):
-    """
-    Tick-by-tick data comes here.
-    Ignore non-tick payloads.
-    """
     if isinstance(message, dict) and "symbol" in message:
         print("📩 TICK:", {
             "symbol": message.get("symbol"),
@@ -89,7 +86,7 @@ def on_connect():
     )
 
 # ------------------------------------------------------------
-# WS THREAD (CRITICAL FIX)
+# WS THREAD
 # ------------------------------------------------------------
 def start_ws():
     global fyers_ws
@@ -98,6 +95,7 @@ def start_ws():
 
         fyers_ws = data_ws.FyersDataSocket(
             access_token=FYERS_ACCESS_TOKEN,
+            client_id=FYERS_CLIENT_ID,   # 🔥 CRITICAL FIX
             on_message=on_message,
             on_error=on_error,
             on_close=on_close,
@@ -108,14 +106,14 @@ def start_ws():
         print("🚨 CALLING WS CONNECT")
         fyers_ws.connect()
 
-        # 🔥 MOST IMPORTANT FOR RENDER
+        # 🔥 REQUIRED FOR RENDER
         fyers_ws.keep_running()
 
     except Exception as e:
         print("🔥 WS THREAD CRASHED:", e)
 
 # ------------------------------------------------------------
-# START WS
+# START WS (BEFORE FLASK)
 # ------------------------------------------------------------
 threading.Thread(target=start_ws, daemon=True).start()
 
