@@ -8,8 +8,8 @@
 import os
 import threading
 import time
-from flask import Flask, jsonify, request
 from datetime import datetime
+from flask import Flask, jsonify, request
 
 print("🚀 main.py STARTED")
 
@@ -28,7 +28,7 @@ if not FYERS_ACCESS_TOKEN:
     raise Exception("❌ FYERS_ACCESS_TOKEN missing")
 
 # ------------------------------------------------------------
-# Flask App (PING + FYERS REDIRECT)
+# Flask App
 # ------------------------------------------------------------
 app = Flask(__name__)
 
@@ -36,6 +36,7 @@ app = Flask(__name__)
 def health():
     return jsonify({"status": "ok", "service": "RajanTradeAutomation"})
 
+# FYERS redirect URI
 @app.route("/fyers-redirect")
 def fyers_redirect():
     auth_code = request.args.get("auth_code")
@@ -48,6 +49,17 @@ def fyers_redirect():
 print("📦 Importing fyers_apiv3 WebSocket")
 from fyers_apiv3.FyersWebsocket import data_ws
 print("✅ data_ws IMPORT SUCCESS")
+
+# ------------------------------------------------------------
+# CURRENT TEST UNIVERSE (5 STOCKS)
+# ------------------------------------------------------------
+SUBSCRIBED_SYMBOLS = [
+    "NSE:SBIN-EQ",
+    "NSE:RELIANCE-EQ",
+    "NSE:VEDL-EQ",
+    "NSE:AXISBANK-EQ",
+    "NSE:KOTAKBANK-EQ"
+]
 
 # ------------------------------------------------------------
 # WS CALLBACKS
@@ -67,15 +79,6 @@ def on_error(message):
 def on_close(message):
     print("🔌 WS CLOSED:", message)
 
-# --- CURRENT 5 STOCK UNIVERSE ---
-SUBSCRIBED_SYMBOLS = [
-    "NSE:SBIN-EQ",
-    "NSE:RELIANCE-EQ",
-    "NSE:VEDL-EQ",
-    "NSE:AXISBANK-EQ",
-    "NSE:KOTAKBANK-EQ"
-]
-
 def on_connect():
     print("🔗 WS CONNECTED")
     print("📡 Subscribing symbols:", SUBSCRIBED_SYMBOLS)
@@ -86,7 +89,7 @@ def on_connect():
     )
 
 # ------------------------------------------------------------
-# WS INITIALIZATION (THREAD-1)
+# WS THREAD-1 : INIT + CONNECT
 # ------------------------------------------------------------
 def start_ws():
     global fyers_ws
@@ -109,7 +112,7 @@ def start_ws():
         print("🔥 WS INIT CRASH:", e)
 
 # ------------------------------------------------------------
-# WS KEEP RUNNING (THREAD-2)
+# WS THREAD-2 : KEEP RUNNING
 # ------------------------------------------------------------
 def keep_ws_alive():
     time.sleep(2)
@@ -129,36 +132,44 @@ from sector_engine import run_sector_bias
 
 SECTOR_LINKS = {
     "NIFTY AUTO": "https://www.nseindia.com/market-data/live-equity-market?symbol=NIFTY%20AUTO",
+    "NIFTY FINANCIAL SERVICES 25/50": "https://www.nseindia.com/market-data/live-equity-market?symbol=NIFTY%20FINANCIAL%20SERVICES%2025%2F50",
     "NIFTY FMCG": "https://www.nseindia.com/market-data/live-equity-market?symbol=NIFTY%20FMCG",
     "NIFTY IT": "https://www.nseindia.com/market-data/live-equity-market?symbol=NIFTY%20IT",
+    "NIFTY MEDIA": "https://www.nseindia.com/market-data/live-equity-market?symbol=NIFTY%20MEDIA",
     "NIFTY METAL": "https://www.nseindia.com/market-data/live-equity-market?symbol=NIFTY%20METAL",
-    "NIFTY PHARMA": "https://www.nseindia.com/market-data/live-equity-market?symbol=NIFTY%20PHARMA"
+    "NIFTY PHARMA": "https://www.nseindia.com/market-data/live-equity-market?symbol=NIFTY%20PHARMA",
+    "NIFTY PSU BANK": "https://www.nseindia.com/market-data/live-equity-market?symbol=NIFTY%20PSU%20BANK",
+    "NIFTY PRIVATE BANK": "https://www.nseindia.com/market-data/live-equity-market?symbol=NIFTY%20PRIVATE%20BANK",
+    "NIFTY REALTY": "https://www.nseindia.com/market-data/live-equity-market?symbol=NIFTY%20REALTY",
+    "NIFTY CONSUMER DURABLES": "https://www.nseindia.com/market-data/live-equity-market?symbol=NIFTY%20CONSUMER%20DURABLES",
+    "NIFTY OIL & GAS": "https://www.nseindia.com/market-data/live-equity-market?symbol=NIFTY%20OIL%20%26%20GAS",
+    "NIFTY FINANCIAL SERVICES EX-BANK": "https://www.nseindia.com/market-data/live-equity-market?symbol=NIFTY%20FINANCIAL%20SERVICES%20EX-BANK",
+    "NIFTY CHEMICALS": "https://www.nseindia.com/market-data/live-equity-market?symbol=NIFTY%20CHEMICALS"
 }
 
 @app.route("/test-sector-bias")
 def test_sector_bias():
-    start_time = datetime.now().strftime("%H:%M:%S")
+    test_time = datetime.now().strftime("%H:%M:%S")
 
     strong_sectors, selected = run_sector_bias(SECTOR_LINKS)
 
     all_symbols = {s.split(":")[1].replace("-EQ", "") for s in SUBSCRIBED_SYMBOLS}
     selected_set = set(selected)
-    drop_preview = sorted(all_symbols - selected_set)
+    unsubscribe_preview = sorted(all_symbols - selected_set)
 
     return jsonify({
-        "test_time": start_time,
-        "current_universe_size": len(all_symbols),
+        "test_time": test_time,
+        "current_universe": list(all_symbols),
         "strong_sectors": strong_sectors,
         "selected_stocks": selected,
         "selected_count": len(selected),
-        "unsubscribe_preview": drop_preview,
+        "unsubscribe_preview": unsubscribe_preview,
         "note": "DRY RUN ONLY – NO WS UNSUBSCRIBE EXECUTED"
     })
 
 # ------------------------------------------------------------
-# START FLASK
+# 🚀 START FLASK (RENDER SAFE)
 # ------------------------------------------------------------
-if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 10000))
-    print(f"🌐 Flask running on port {port}")
-    app.run(host="0.0.0.0", port=port)
+port = int(os.environ.get("PORT", 10000))
+print(f"🌐 Flask running on port {port}")
+app.run(host="0.0.0.0", port=port)
