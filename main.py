@@ -1,7 +1,9 @@
 # ============================================================
 # RajanTradeAutomation – main.py
 # Phase-0 : FYERS LIVE TICK BY TICK + 5 MIN CANDLE
-# WS FLOW LOCKED | CRUDE OIL JAN-26 FIX
+# NSE -> SymbolUpdate
+# MCX Crude Oil -> DepthUpdate
+# TICKS + CANDLES BOTH VISIBLE
 # ============================================================
 
 import os
@@ -9,9 +11,6 @@ import time
 import threading
 from flask import Flask, jsonify, request
 
-# ------------------------------------------------------------
-# Basic Logs
-# ------------------------------------------------------------
 print("🚀 main.py STARTED")
 
 # ------------------------------------------------------------
@@ -43,7 +42,7 @@ def health():
 def fyers_callback():
     auth_code = request.args.get("auth_code")
     print("🔑 FYERS CALLBACK HIT | AUTH CODE =", auth_code)
-    return jsonify({"status": "callback_received", "auth_code": auth_code})
+    return jsonify({"status": "callback_received"})
 
 @app.route("/fyers-redirect")
 def fyers_redirect():
@@ -54,11 +53,7 @@ def fyers_redirect():
     print("AUTH CODE =", auth_code)
     print("STATE =", state)
 
-    return jsonify({
-        "status": "redirect_received",
-        "auth_code": auth_code,
-        "state": state
-    })
+    return jsonify({"status": "redirect_received"})
 
 # ------------------------------------------------------------
 # FYERS WebSocket
@@ -66,12 +61,12 @@ def fyers_redirect():
 from fyers_apiv3.FyersWebsocket import data_ws
 
 # ------------------------------------------------------------
-# 🔒 5-MIN CANDLE ENGINE
+# 5-MIN CANDLE ENGINE
 # ------------------------------------------------------------
-CANDLE_INTERVAL = 300
+CANDLE_INTERVAL = 300  # 5 minutes
 
-candles = {}
-last_candle_vol = {}
+candles = {}          # symbol -> running candle
+last_candle_vol = {}  # symbol -> last cumulative volume
 
 def candle_start(ts):
     return ts - (ts % CANDLE_INTERVAL)
@@ -104,6 +99,7 @@ def update_candle_from_tick(msg):
     start = candle_start(ts)
     c = candles.get(symbol)
 
+    # New candle
     if c is None or c["start"] != start:
         if c:
             close_candle(symbol, c)
@@ -118,6 +114,7 @@ def update_candle_from_tick(msg):
         }
         return
 
+    # Update running candle
     c["high"] = max(c["high"], ltp)
     c["low"] = min(c["low"], ltp)
     c["close"] = ltp
@@ -127,6 +124,9 @@ def update_candle_from_tick(msg):
 # WebSocket Callbacks
 # ------------------------------------------------------------
 def on_message(message):
+    # 🔊 TICK PRINT ENABLED
+    print("📩 TICK:", message)
+
     update_candle_from_tick(message)
 
 def on_error(message):
@@ -138,22 +138,28 @@ def on_close(message):
 def on_connect():
     print("🔗 WS CONNECTED")
 
-    symbols = [
+    # NSE STOCKS
+    stock_symbols = [
         "NSE:SBIN-EQ",
         "NSE:RELIANCE-EQ",
         "NSE:VEDL-EQ",
         "NSE:AXISBANK-EQ",
-        "NSE:KOTAKBANK-EQ",
-
-        # ✅ VALID ACTIVE CRUDE OIL FUT
-        "MCX:CRUDEOIL26JANFUT"
+        "NSE:KOTAKBANK-EQ"
     ]
 
-    print("📡 Subscribing symbols:", symbols)
+    # MCX CRUDE OIL (ACTIVE CONTRACT)
+    crude_symbol = "MCX:CRUDEOIL26JANFUT"
 
+    print("📡 Subscribing NSE (SymbolUpdate):", stock_symbols)
     fyers_ws.subscribe(
-        symbols=symbols,
+        symbols=stock_symbols,
         data_type="SymbolUpdate"
+    )
+
+    print("📡 Subscribing MCX (DepthUpdate):", crude_symbol)
+    fyers_ws.subscribe(
+        symbols=[crude_symbol],
+        data_type="DepthUpdate"
     )
 
 # ------------------------------------------------------------
@@ -161,6 +167,8 @@ def on_connect():
 # ------------------------------------------------------------
 def start_ws():
     global fyers_ws
+
+    print("🧵 WS THREAD STARTED")
 
     fyers_ws = data_ws.FyersDataSocket(
         access_token=FYERS_ACCESS_TOKEN,
@@ -172,6 +180,7 @@ def start_ws():
     )
 
     fyers_ws.connect()
+    print("📶 WS CONNECT CALLED")
 
 threading.Thread(target=start_ws, daemon=True).start()
 
@@ -180,4 +189,5 @@ threading.Thread(target=start_ws, daemon=True).start()
 # ------------------------------------------------------------
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
+    print(f"🌐 Starting Flask on port {port}")
     app.run(host="0.0.0.0", port=port)
