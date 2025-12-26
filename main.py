@@ -2,10 +2,9 @@
 # RajanTradeAutomation – main.py
 # Phase-0 : FYERS LIVE TICK BY TICK + 5 MIN CANDLE
 #
-# NSE  -> SymbolUpdate (ltp available)
+# NSE  -> SymbolUpdate (ltp direct)
 # MCX  -> DepthUpdate  (ltp derived from bid/ask)
-#
-# TICKS + CANDLES BOTH VISIBLE
+# FIX  -> Timer based candle close (for MCX reliability)
 # ============================================================
 
 import os
@@ -21,13 +20,6 @@ print("🚀 main.py STARTED")
 FYERS_CLIENT_ID = os.getenv("FYERS_CLIENT_ID")
 FYERS_ACCESS_TOKEN = os.getenv("FYERS_ACCESS_TOKEN")
 
-print("🔍 ENV CHECK")
-print("FYERS_CLIENT_ID =", FYERS_CLIENT_ID)
-print(
-    "FYERS_ACCESS_TOKEN prefix =",
-    FYERS_ACCESS_TOKEN[:20] if FYERS_ACCESS_TOKEN else "❌ MISSING"
-)
-
 if not FYERS_CLIENT_ID or not FYERS_ACCESS_TOKEN:
     raise Exception("❌ FYERS ENV variables missing")
 
@@ -38,24 +30,7 @@ app = Flask(__name__)
 
 @app.route("/")
 def health():
-    return jsonify({"status": "ok", "service": "RajanTradeAutomation"})
-
-@app.route("/callback")
-def fyers_callback():
-    auth_code = request.args.get("auth_code")
-    print("🔑 FYERS CALLBACK HIT | AUTH CODE =", auth_code)
-    return jsonify({"status": "callback_received"})
-
-@app.route("/fyers-redirect")
-def fyers_redirect():
-    auth_code = request.args.get("auth_code") or request.args.get("code")
-    state = request.args.get("state")
-
-    print("🔑 FYERS REDIRECT HIT")
-    print("AUTH CODE =", auth_code)
-    print("STATE =", state)
-
-    return jsonify({"status": "redirect_received"})
+    return jsonify({"status": "ok"})
 
 # ------------------------------------------------------------
 # FYERS WebSocket
@@ -94,41 +69,28 @@ def update_candle_from_tick(msg):
     if not symbol:
         return
 
-    # --------------------------------------------------------
-    # PRICE EXTRACTION (SymbolUpdate OR DepthUpdate)
-    # --------------------------------------------------------
+    # ---------------- PRICE ----------------
     ltp = msg.get("ltp")
 
     if ltp is None:
-        # DepthUpdate (MCX)
         bid = msg.get("bid_price1")
         ask = msg.get("ask_price1")
-
         if bid is not None and ask is not None:
             ltp = (bid + ask) / 2
         else:
-            return  # no usable price
+            return
 
-    # --------------------------------------------------------
-    # TIME & VOLUME
-    # --------------------------------------------------------
+    # ---------------- TIME ----------------
     ts = msg.get("exch_feed_time") or msg.get("last_traded_time")
     if ts is None:
         return
 
     vol = msg.get("vol_traded_today", 0)
 
-    # --------------------------------------------------------
-    # CANDLE BUILD
-    # --------------------------------------------------------
     start = candle_start(ts)
     c = candles.get(symbol)
 
-    # NEW CANDLE
-    if c is None or c["start"] != start:
-        if c:
-            close_candle(symbol, c)
-
+    if c is None:
         candles[symbol] = {
             "start": start,
             "open": ltp,
@@ -139,19 +101,43 @@ def update_candle_from_tick(msg):
         }
         return
 
-    # UPDATE RUNNING CANDLE
+    if c["start"] != start:
+        close_candle(symbol, c)
+        candles[symbol] = {
+            "start": start,
+            "open": ltp,
+            "high": ltp,
+            "low": ltp,
+            "close": ltp,
+            "cum_vol": vol
+        }
+        return
+
     c["high"] = max(c["high"], ltp)
     c["low"] = min(c["low"], ltp)
     c["close"] = ltp
     c["cum_vol"] = vol
 
 # ------------------------------------------------------------
+# 🔥 TIMER-BASED FORCE CLOSE (KEY FIX)
+# ------------------------------------------------------------
+def force_candle_close_timer():
+    while True:
+        now = int(time.time())
+        current_bucket = candle_start(now)
+
+        for symbol, c in list(candles.items()):
+            if c and c["start"] < current_bucket:
+                close_candle(symbol, c)
+                candles[symbol] = None
+
+        time.sleep(20)  # safe interval
+
+# ------------------------------------------------------------
 # WebSocket Callbacks
 # ------------------------------------------------------------
 def on_message(message):
-    # 🔊 TICKS VISIBLE
     print("📩 TICK:", message)
-
     update_candle_from_tick(message)
 
 def on_error(message):
@@ -163,7 +149,7 @@ def on_close(message):
 def on_connect():
     print("🔗 WS CONNECTED")
 
-    # NSE STOCKS
+    # NSE STOCKS (UNCHANGED)
     stock_symbols = [
         "NSE:SBIN-EQ",
         "NSE:RELIANCE-EQ",
@@ -172,16 +158,14 @@ def on_connect():
         "NSE:KOTAKBANK-EQ"
     ]
 
-    # MCX CRUDE OIL (ACTIVE)
+    # MCX CRUDE OIL
     crude_symbol = "MCX:CRUDEOIL26JANFUT"
 
-    print("📡 Subscribing NSE (SymbolUpdate):", stock_symbols)
     fyers_ws.subscribe(
         symbols=stock_symbols,
         data_type="SymbolUpdate"
     )
 
-    print("📡 Subscribing MCX (DepthUpdate):", crude_symbol)
     fyers_ws.subscribe(
         symbols=[crude_symbol],
         data_type="DepthUpdate"
@@ -193,8 +177,6 @@ def on_connect():
 def start_ws():
     global fyers_ws
 
-    print("🧵 WS THREAD STARTED")
-
     fyers_ws = data_ws.FyersDataSocket(
         access_token=FYERS_ACCESS_TOKEN,
         on_message=on_message,
@@ -205,14 +187,13 @@ def start_ws():
     )
 
     fyers_ws.connect()
-    print("📶 WS CONNECT CALLED")
 
 threading.Thread(target=start_ws, daemon=True).start()
+threading.Thread(target=force_candle_close_timer, daemon=True).start()
 
 # ------------------------------------------------------------
 # Start Flask
 # ------------------------------------------------------------
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
-    print(f"🌐 Starting Flask on port {port}")
     app.run(host="0.0.0.0", port=port)
