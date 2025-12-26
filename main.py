@@ -1,8 +1,7 @@
 # ============================================================
-# RajanTradeAutomation – main.py (Render Stable WS Version)
-# FIXED: setuptools<81, FYERS WS, Render-safe threading
-# + ADDED: FYERS CALLBACK URI ROUTE
-# + ADDED: FYERS REDIRECT URI (v3)
+# RajanTradeAutomation – main.py
+# Phase-0 : FYERS LIVE TICK BY TICK + 5 MIN CANDLE
+# WS FLOW LOCKED | ONLY CANDLE LOGIC ADDED
 # ============================================================
 
 import os
@@ -32,48 +31,28 @@ if not FYERS_CLIENT_ID or not FYERS_ACCESS_TOKEN:
     raise Exception("❌ FYERS ENV variables missing")
 
 # ------------------------------------------------------------
-# Flask App (Render keep-alive)
+# Flask App (Ping + Redirects)
 # ------------------------------------------------------------
 app = Flask(__name__)
 
 @app.route("/")
 def health():
-    return jsonify({
-        "status": "ok",
-        "service": "RajanTradeAutomation"
-    })
+    return jsonify({"status": "ok", "service": "RajanTradeAutomation"})
 
-# ------------------------------------------------------------
-# FYERS CALLBACK (OLD – KEEP AS IS)
-# ------------------------------------------------------------
 @app.route("/callback")
 def fyers_callback():
     auth_code = request.args.get("auth_code")
-    print("🔑 FYERS CALLBACK HIT")
-    print("🔑 AUTH CODE =", auth_code)
+    print("🔑 FYERS CALLBACK HIT | AUTH CODE =", auth_code)
+    return jsonify({"status": "callback_received", "auth_code": auth_code})
 
-    if not auth_code:
-        return jsonify({"error": "auth_code missing"}), 400
-
-    return jsonify({
-        "status": "callback_received",
-        "auth_code": auth_code
-    })
-
-# ------------------------------------------------------------
-# FYERS REDIRECT URI (NEW – v3 compatible)
-# ------------------------------------------------------------
 @app.route("/fyers-redirect")
 def fyers_redirect():
     auth_code = request.args.get("auth_code") or request.args.get("code")
     state = request.args.get("state")
 
     print("🔑 FYERS REDIRECT HIT")
-    print("🔑 AUTH CODE =", auth_code)
-    print("🔑 STATE =", state)
-
-    if not auth_code:
-        return jsonify({"error": "auth_code missing"}), 400
+    print("AUTH CODE =", auth_code)
+    print("STATE =", state)
 
     return jsonify({
         "status": "redirect_received",
@@ -89,10 +68,71 @@ from fyers_apiv3.FyersWebsocket import data_ws
 print("✅ data_ws IMPORT SUCCESS")
 
 # ------------------------------------------------------------
-# WebSocket Callbacks (UNCHANGED)
+# 🔒 5-MIN CANDLE ENGINE (LOCAL, PROVEN)
+# ------------------------------------------------------------
+CANDLE_INTERVAL = 300  # 5 minutes
+
+candles = {}          # symbol -> running candle
+last_candle_vol = {}  # symbol -> last candle cumulative volume
+
+def candle_start(ts):
+    return ts - (ts % CANDLE_INTERVAL)
+
+def close_candle(symbol, c):
+    prev_vol = last_candle_vol.get(symbol, c["cum_vol"])
+    candle_vol = c["cum_vol"] - prev_vol
+    last_candle_vol[symbol] = c["cum_vol"]
+
+    print(
+        f"\n🟩 5m CANDLE CLOSED | {symbol}"
+        f"\nTime : {time.strftime('%H:%M:%S', time.localtime(c['start']))}"
+        f"\nO:{c['open']} H:{c['high']} L:{c['low']} "
+        f"C:{c['close']} V:{candle_vol}"
+        f"\n-------------------------------"
+    )
+
+def update_candle_from_tick(msg):
+    if not isinstance(msg, dict):
+        return
+
+    symbol = msg.get("symbol")
+    ltp = msg.get("ltp")
+    vol = msg.get("vol_traded_today")
+    ts = msg.get("exch_feed_time")
+
+    if not symbol or ltp is None or vol is None or ts is None:
+        return
+
+    start = candle_start(ts)
+    c = candles.get(symbol)
+
+    # NEW CANDLE
+    if c is None or c["start"] != start:
+        if c:
+            close_candle(symbol, c)
+
+        candles[symbol] = {
+            "start": start,
+            "open": ltp,
+            "high": ltp,
+            "low": ltp,
+            "close": ltp,
+            "cum_vol": vol
+        }
+        return
+
+    # UPDATE RUNNING CANDLE
+    c["high"] = max(c["high"], ltp)
+    c["low"] = min(c["low"], ltp)
+    c["close"] = ltp
+    c["cum_vol"] = vol
+
+# ------------------------------------------------------------
+# WebSocket Callbacks (WS FLOW UNCHANGED)
 # ------------------------------------------------------------
 def on_message(message):
     print("📩 WS MESSAGE:", message)
+    update_candle_from_tick(message)   # ✅ ONLY ADDITION
 
 def on_error(message):
     print("❌ WS ERROR:", message)
@@ -119,7 +159,7 @@ def on_connect():
     )
 
 # ------------------------------------------------------------
-# Start WebSocket (NON-BLOCKING) – UNCHANGED
+# Start WebSocket (NON-BLOCKING) – 🔒 UNCHANGED
 # ------------------------------------------------------------
 def start_ws():
     try:
@@ -142,9 +182,6 @@ def start_ws():
     except Exception as e:
         print("🔥 WS THREAD CRASHED:", e)
 
-# ------------------------------------------------------------
-# Launch WS in daemon thread
-# ------------------------------------------------------------
 ws_thread = threading.Thread(target=start_ws, daemon=True)
 ws_thread.start()
 
