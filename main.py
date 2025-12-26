@@ -1,7 +1,7 @@
 # ============================================================
 # RajanTradeAutomation – main.py
-# Phase-0 : FYERS LIVE TICK BY TICK + 5 MIN CANDLE
-# WS FLOW LOCKED | ONLY CANDLE LOGIC ADDED
+# Phase-0 : FYERS LIVE TICK BY TICK (SILENT) + 5 MIN CANDLE
+# WS FLOW LOCKED | ONLY CANDLE LOGS ENABLED
 # ============================================================
 
 import os
@@ -68,7 +68,7 @@ from fyers_apiv3.FyersWebsocket import data_ws
 print("✅ data_ws IMPORT SUCCESS")
 
 # ------------------------------------------------------------
-# 🔒 5-MIN CANDLE ENGINE (LOCAL, PROVEN)
+# 🔒 5-MIN CANDLE ENGINE (PROVEN)
 # ------------------------------------------------------------
 CANDLE_INTERVAL = 300  # 5 minutes
 
@@ -128,11 +128,11 @@ def update_candle_from_tick(msg):
     c["cum_vol"] = vol
 
 # ------------------------------------------------------------
-# WebSocket Callbacks (WS FLOW UNCHANGED)
+# WebSocket Callbacks
 # ------------------------------------------------------------
 def on_message(message):
-    print("📩 WS MESSAGE:", message)
-    update_candle_from_tick(message)   # ✅ ONLY ADDITION
+    # 🔕 TICKS SILENT (NO RENDER NOISE)
+    update_candle_from_tick(message)
 
 def on_error(message):
     print("❌ WS ERROR:", message)
@@ -159,7 +159,7 @@ def on_connect():
     )
 
 # ------------------------------------------------------------
-# Start WebSocket (NON-BLOCKING) – 🔒 UNCHANGED
+# Start WebSocket (NON-BLOCKING)
 # ------------------------------------------------------------
 def start_ws():
     try:
