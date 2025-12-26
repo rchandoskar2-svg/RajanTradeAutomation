@@ -1,10 +1,7 @@
 # ============================================================
 # RajanTradeAutomation – main.py
-# FINAL LOCKED VERSION
-# ✔ SILENT TICKS
-# ✔ 5-MIN CANDLE (CUM VOL)
-# ✔ FYERS REDIRECT
-# ✔ RENDER SAFE (KEEP_RUNNING FIXED)
+# Phase-0 : FYERS LIVE TICK BY TICK + 5 MIN CANDLE
+# WS FLOW LOCKED | TICKS SILENT | CANDLES VISIBLE
 # ============================================================
 
 import os
@@ -12,6 +9,9 @@ import time
 import threading
 from flask import Flask, jsonify, request
 
+# ------------------------------------------------------------
+# Basic Logs
+# ------------------------------------------------------------
 print("🚀 main.py STARTED")
 
 # ------------------------------------------------------------
@@ -31,13 +31,19 @@ if not FYERS_CLIENT_ID or not FYERS_ACCESS_TOKEN:
     raise Exception("❌ FYERS ENV variables missing")
 
 # ------------------------------------------------------------
-# FLASK APP
+# Flask App (Ping + Redirects)
 # ------------------------------------------------------------
 app = Flask(__name__)
 
 @app.route("/")
 def health():
     return jsonify({"status": "ok", "service": "RajanTradeAutomation"})
+
+@app.route("/callback")
+def fyers_callback():
+    auth_code = request.args.get("auth_code")
+    print("🔑 FYERS CALLBACK HIT | AUTH CODE =", auth_code)
+    return jsonify({"status": "callback_received", "auth_code": auth_code})
 
 @app.route("/fyers-redirect")
 def fyers_redirect():
@@ -48,51 +54,40 @@ def fyers_redirect():
     print("AUTH CODE =", auth_code)
     print("STATE =", state)
 
-    if not auth_code:
-        return jsonify({"error": "auth_code missing"}), 400
-
     return jsonify({
-        "status": "fyers_redirect_received",
+        "status": "redirect_received",
         "auth_code": auth_code,
         "state": state
     })
 
 # ------------------------------------------------------------
-# FYERS WS IMPORT
+# FYERS WebSocket
 # ------------------------------------------------------------
 print("📦 Importing fyers_apiv3 WebSocket")
 from fyers_apiv3.FyersWebsocket import data_ws
 print("✅ data_ws IMPORT SUCCESS")
 
 # ------------------------------------------------------------
-# CONFIG
+# 🔒 5-MIN CANDLE ENGINE (UNCHANGED / PROVEN)
 # ------------------------------------------------------------
-SYMBOLS = [
-    "NSE:SBIN-EQ",
-    "NSE:RELIANCE-EQ",
-    "NSE:VEDL-EQ",
-    "NSE:AXISBANK-EQ",
-    "NSE:KOTAKBANK-EQ"
-]
-
-CANDLE_INTERVAL = 300  # 5 min
+CANDLE_INTERVAL = 300  # 5 minutes
 
 candles = {}
-last_cum_vol = {}
+last_candle_vol = {}
 
-def get_candle_start(ts):
+def candle_start(ts):
     return ts - (ts % CANDLE_INTERVAL)
 
 def close_candle(symbol, c):
-    prev = last_cum_vol.get(symbol, c["cum_vol"])
-    vol = c["cum_vol"] - prev
-    last_cum_vol[symbol] = c["cum_vol"]
+    prev_vol = last_candle_vol.get(symbol, c["cum_vol"])
+    candle_vol = c["cum_vol"] - prev_vol
+    last_candle_vol[symbol] = c["cum_vol"]
 
     print(
         f"\n🟩 5m CANDLE CLOSED | {symbol}"
         f"\nTime : {time.strftime('%H:%M:%S', time.localtime(c['start']))}"
         f"\nO:{c['open']} H:{c['high']} L:{c['low']} "
-        f"C:{c['close']} V:{vol}"
+        f"C:{c['close']} V:{candle_vol}"
         f"\n-------------------------------"
     )
 
@@ -108,7 +103,7 @@ def update_candle_from_tick(msg):
     if not symbol or ltp is None or vol is None or ts is None:
         return
 
-    start = get_candle_start(ts)
+    start = candle_start(ts)
     c = candles.get(symbol)
 
     if c is None or c["start"] != start:
@@ -131,13 +126,11 @@ def update_candle_from_tick(msg):
     c["cum_vol"] = vol
 
 # ------------------------------------------------------------
-# WS CALLBACKS (SILENT)
+# WebSocket Callbacks (🔥 TICKS SILENT)
 # ------------------------------------------------------------
 def on_message(message):
-    try:
-        update_candle_from_tick(message)
-    except Exception as e:
-        print("🔥 Candle error:", e)
+    # ❌ NO TICK PRINT
+    update_candle_from_tick(message)
 
 def on_error(message):
     print("❌ WS ERROR:", message)
@@ -147,11 +140,24 @@ def on_close(message):
 
 def on_connect():
     print("🔗 WS CONNECTED")
-    print("📡 Subscribing:", SYMBOLS)
-    fyers_ws.subscribe(symbols=SYMBOLS, data_type="SymbolUpdate")
+
+    symbols = [
+        "NSE:SBIN-EQ",
+        "NSE:RELIANCE-EQ",
+        "NSE:VEDL-EQ",
+        "NSE:AXISBANK-EQ",
+        "NSE:KOTAKBANK-EQ"
+    ]
+
+    print("📡 Subscribing symbols:", symbols)
+
+    fyers_ws.subscribe(
+        symbols=symbols,
+        data_type="SymbolUpdate"
+    )
 
 # ------------------------------------------------------------
-# WS THREAD-1 : CONNECT
+# WS THREAD-1 : CONNECT (UNCHANGED)
 # ------------------------------------------------------------
 def start_ws():
     global fyers_ws
@@ -170,10 +176,10 @@ def start_ws():
     print("📶 WS CONNECT CALLED")
 
 # ------------------------------------------------------------
-# WS THREAD-2 : KEEP RUNNING (🔥 THIS WAS MISSING)
+# WS THREAD-2 : KEEP RUNNING (MANDATORY)
 # ------------------------------------------------------------
 def keep_ws_alive():
-    time.sleep(2)  # allow connect first
+    time.sleep(2)
     print("♻️ WS KEEP RUNNING")
     fyers_ws.keep_running()
 
@@ -181,9 +187,9 @@ threading.Thread(target=start_ws, daemon=True).start()
 threading.Thread(target=keep_ws_alive, daemon=True).start()
 
 # ------------------------------------------------------------
-# START FLASK
+# Start Flask (MAIN THREAD)
 # ------------------------------------------------------------
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
-    print(f"🌐 Flask running on port {port}")
+    print(f"🌐 Starting Flask on port {port}")
     app.run(host="0.0.0.0", port=port)
