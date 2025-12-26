@@ -1,13 +1,12 @@
 # ============================================================
 # RajanTradeAutomation – main.py
 # Phase-0 : FYERS LIVE TICK BY TICK + 5 MIN CANDLE
-# WS FLOW LOCKED | AUTO CRUDE OIL FUT ADDED
+# WS FLOW LOCKED | CRUDE OIL JAN-26 FIX
 # ============================================================
 
 import os
 import time
 import threading
-from datetime import datetime
 from flask import Flask, jsonify, request
 
 # ------------------------------------------------------------
@@ -32,7 +31,7 @@ if not FYERS_CLIENT_ID or not FYERS_ACCESS_TOKEN:
     raise Exception("❌ FYERS ENV variables missing")
 
 # ------------------------------------------------------------
-# Flask App (Ping + Redirects)
+# Flask App
 # ------------------------------------------------------------
 app = Flask(__name__)
 
@@ -64,29 +63,15 @@ def fyers_redirect():
 # ------------------------------------------------------------
 # FYERS WebSocket
 # ------------------------------------------------------------
-print("📦 Importing fyers_apiv3 WebSocket")
 from fyers_apiv3.FyersWebsocket import data_ws
-print("✅ data_ws IMPORT SUCCESS")
 
 # ------------------------------------------------------------
-# 🛢️ AUTO CURRENT MONTH CRUDE OIL FUT (MCX)
+# 🔒 5-MIN CANDLE ENGINE
 # ------------------------------------------------------------
-def get_crudeoil_current_month_symbol():
-    now = datetime.now()
-    year = now.strftime("%y")          # 25
-    month = now.strftime("%b").upper() # JAN, FEB, MAR...
-    return f"MCX:CRUDEOIL{year}{month}FUT"
+CANDLE_INTERVAL = 300
 
-CRUDE_OIL_SYMBOL = get_crudeoil_current_month_symbol()
-print("🛢️ Auto Crude Oil Symbol =", CRUDE_OIL_SYMBOL)
-
-# ------------------------------------------------------------
-# 🔒 5-MIN CANDLE ENGINE (LOCAL, PROVEN)
-# ------------------------------------------------------------
-CANDLE_INTERVAL = 300  # 5 minutes
-
-candles = {}          # symbol -> running candle
-last_candle_vol = {}  # symbol -> last candle cumulative volume
+candles = {}
+last_candle_vol = {}
 
 def candle_start(ts):
     return ts - (ts % CANDLE_INTERVAL)
@@ -119,7 +104,6 @@ def update_candle_from_tick(msg):
     start = candle_start(ts)
     c = candles.get(symbol)
 
-    # NEW CANDLE
     if c is None or c["start"] != start:
         if c:
             close_candle(symbol, c)
@@ -134,17 +118,15 @@ def update_candle_from_tick(msg):
         }
         return
 
-    # UPDATE RUNNING CANDLE
     c["high"] = max(c["high"], ltp)
     c["low"] = min(c["low"], ltp)
     c["close"] = ltp
     c["cum_vol"] = vol
 
 # ------------------------------------------------------------
-# WebSocket Callbacks (WS FLOW UNCHANGED)
+# WebSocket Callbacks
 # ------------------------------------------------------------
 def on_message(message):
-    print("📩 WS MESSAGE:", message)
     update_candle_from_tick(message)
 
 def on_error(message):
@@ -162,7 +144,9 @@ def on_connect():
         "NSE:VEDL-EQ",
         "NSE:AXISBANK-EQ",
         "NSE:KOTAKBANK-EQ",
-        CRUDE_OIL_SYMBOL          # ✅ ADDED
+
+        # ✅ VALID ACTIVE CRUDE OIL FUT
+        "MCX:CRUDEOIL26JANFUT"
     ]
 
     print("📡 Subscribing symbols:", symbols)
@@ -173,36 +157,27 @@ def on_connect():
     )
 
 # ------------------------------------------------------------
-# Start WebSocket (NON-BLOCKING)
+# Start WebSocket
 # ------------------------------------------------------------
 def start_ws():
-    try:
-        print("🧵 WS THREAD STARTED")
+    global fyers_ws
 
-        global fyers_ws
-        fyers_ws = data_ws.FyersDataSocket(
-            access_token=FYERS_ACCESS_TOKEN,
-            on_message=on_message,
-            on_error=on_error,
-            on_close=on_close,
-            on_connect=on_connect,
-            reconnect=True
-        )
+    fyers_ws = data_ws.FyersDataSocket(
+        access_token=FYERS_ACCESS_TOKEN,
+        on_message=on_message,
+        on_error=on_error,
+        on_close=on_close,
+        on_connect=on_connect,
+        reconnect=True
+    )
 
-        print("✅ FyersDataSocket CREATED")
-        fyers_ws.connect()
-        print("📶 WS CONNECT CALLED")
+    fyers_ws.connect()
 
-    except Exception as e:
-        print("🔥 WS THREAD CRASHED:", e)
-
-ws_thread = threading.Thread(target=start_ws, daemon=True)
-ws_thread.start()
+threading.Thread(target=start_ws, daemon=True).start()
 
 # ------------------------------------------------------------
-# Start Flask (MAIN THREAD)
+# Start Flask
 # ------------------------------------------------------------
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
-    print(f"🌐 Starting Flask on port {port}")
     app.run(host="0.0.0.0", port=port)
