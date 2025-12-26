@@ -1,8 +1,10 @@
 # ============================================================
 # RajanTradeAutomation – main.py
 # Phase-0 : FYERS LIVE TICK BY TICK + 5 MIN CANDLE
-# NSE -> SymbolUpdate
-# MCX Crude Oil -> DepthUpdate
+#
+# NSE  -> SymbolUpdate (ltp available)
+# MCX  -> DepthUpdate  (ltp derived from bid/ask)
+#
 # TICKS + CANDLES BOTH VISIBLE
 # ============================================================
 
@@ -89,17 +91,40 @@ def update_candle_from_tick(msg):
         return
 
     symbol = msg.get("symbol")
-    ltp = msg.get("ltp")
-    vol = msg.get("vol_traded_today")
-    ts = msg.get("exch_feed_time")
-
-    if not symbol or ltp is None or vol is None or ts is None:
+    if not symbol:
         return
 
+    # --------------------------------------------------------
+    # PRICE EXTRACTION (SymbolUpdate OR DepthUpdate)
+    # --------------------------------------------------------
+    ltp = msg.get("ltp")
+
+    if ltp is None:
+        # DepthUpdate (MCX)
+        bid = msg.get("bid_price1")
+        ask = msg.get("ask_price1")
+
+        if bid is not None and ask is not None:
+            ltp = (bid + ask) / 2
+        else:
+            return  # no usable price
+
+    # --------------------------------------------------------
+    # TIME & VOLUME
+    # --------------------------------------------------------
+    ts = msg.get("exch_feed_time") or msg.get("last_traded_time")
+    if ts is None:
+        return
+
+    vol = msg.get("vol_traded_today", 0)
+
+    # --------------------------------------------------------
+    # CANDLE BUILD
+    # --------------------------------------------------------
     start = candle_start(ts)
     c = candles.get(symbol)
 
-    # New candle
+    # NEW CANDLE
     if c is None or c["start"] != start:
         if c:
             close_candle(symbol, c)
@@ -114,7 +139,7 @@ def update_candle_from_tick(msg):
         }
         return
 
-    # Update running candle
+    # UPDATE RUNNING CANDLE
     c["high"] = max(c["high"], ltp)
     c["low"] = min(c["low"], ltp)
     c["close"] = ltp
@@ -124,7 +149,7 @@ def update_candle_from_tick(msg):
 # WebSocket Callbacks
 # ------------------------------------------------------------
 def on_message(message):
-    # 🔊 TICK PRINT ENABLED
+    # 🔊 TICKS VISIBLE
     print("📩 TICK:", message)
 
     update_candle_from_tick(message)
@@ -147,7 +172,7 @@ def on_connect():
         "NSE:KOTAKBANK-EQ"
     ]
 
-    # MCX CRUDE OIL (ACTIVE CONTRACT)
+    # MCX CRUDE OIL (ACTIVE)
     crude_symbol = "MCX:CRUDEOIL26JANFUT"
 
     print("📡 Subscribing NSE (SymbolUpdate):", stock_symbols)
