@@ -1,7 +1,7 @@
 # ============================================================
 # RajanTradeAutomation – main.py
-# FYERS LIVE TICKS + 5 MIN CANDLES (SILENT)
-# WS FLOW FIXED (connect + keep_running)
+# FYERS LIVE TICKS (SILENT) + 5 MIN CANDLES
+# WS CONNECT FIXED (single thread)
 # ============================================================
 
 import os
@@ -78,7 +78,7 @@ def update_candle(msg):
     if not symbol or ltp is None or vol is None or ts is None:
         return
 
-    if ts > 10_000_000_000:
+    if ts > 10_000_000_000:  # ms → sec safety
         ts //= 1000
 
     start = candle_start(ts)
@@ -128,10 +128,11 @@ def on_connect():
     fyers_ws.subscribe(symbols=symbols, data_type="SymbolUpdate")
 
 # ------------------------------------------------------------
-# THREAD 1 – CONNECT
+# SINGLE WS THREAD (🔥 KEY FIX)
 # ------------------------------------------------------------
-def start_ws():
+def run_ws():
     global fyers_ws
+
     fyers_ws = data_ws.FyersDataSocket(
         access_token=FYERS_ACCESS_TOKEN,
         on_message=on_message,
@@ -140,19 +141,14 @@ def start_ws():
         on_connect=on_connect,
         reconnect=True
     )
+
     print("🚨 WS CONNECTING ...")
     fyers_ws.connect()
 
-# ------------------------------------------------------------
-# THREAD 2 – KEEP RUNNING  ✅ FIX
-# ------------------------------------------------------------
-def keep_ws_alive():
-    time.sleep(2)
     print("♻️ WS KEEP RUNNING")
     fyers_ws.keep_running()
 
-threading.Thread(target=start_ws, daemon=True).start()
-threading.Thread(target=keep_ws_alive, daemon=True).start()
+threading.Thread(target=run_ws, daemon=True).start()
 
 # ------------------------------------------------------------
 # START FLASK
