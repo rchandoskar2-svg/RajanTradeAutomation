@@ -1,7 +1,7 @@
 # ============================================================
 # RajanTradeAutomation – main.py
 # Phase-0 : FYERS LIVE TICK BY TICK + 5 MIN CANDLE
-# WS FLOW LOCKED | TICKS SILENT | CANDLES VISIBLE
+# WS FLOW LOCKED | TICKS SILENT | MS/SEC SAFE
 # ============================================================
 
 import os
@@ -10,7 +10,7 @@ import threading
 from flask import Flask, jsonify, request
 
 # ------------------------------------------------------------
-# Basic Logs
+# BOOT LOG
 # ------------------------------------------------------------
 print("🚀 main.py STARTED")
 
@@ -22,16 +22,13 @@ FYERS_ACCESS_TOKEN = os.getenv("FYERS_ACCESS_TOKEN")
 
 print("🔍 ENV CHECK")
 print("FYERS_CLIENT_ID =", FYERS_CLIENT_ID)
-print(
-    "FYERS_ACCESS_TOKEN prefix =",
-    FYERS_ACCESS_TOKEN[:20] if FYERS_ACCESS_TOKEN else "❌ MISSING"
-)
+print("FYERS_ACCESS_TOKEN prefix =", FYERS_ACCESS_TOKEN[:20] if FYERS_ACCESS_TOKEN else "❌ MISSING")
 
 if not FYERS_CLIENT_ID or not FYERS_ACCESS_TOKEN:
     raise Exception("❌ FYERS ENV variables missing")
 
 # ------------------------------------------------------------
-# Flask App (Ping + Redirects)
+# FLASK APP (PING + REDIRECTS)
 # ------------------------------------------------------------
 app = Flask(__name__)
 
@@ -61,14 +58,14 @@ def fyers_redirect():
     })
 
 # ------------------------------------------------------------
-# FYERS WebSocket
+# FYERS WEBSOCKET
 # ------------------------------------------------------------
 print("📦 Importing fyers_apiv3 WebSocket")
 from fyers_apiv3.FyersWebsocket import data_ws
 print("✅ data_ws IMPORT SUCCESS")
 
 # ------------------------------------------------------------
-# 🔒 5-MIN CANDLE ENGINE (UNCHANGED / PROVEN)
+# 🔒 5-MIN CANDLE ENGINE (FINAL – MS SAFE)
 # ------------------------------------------------------------
 CANDLE_INTERVAL = 300  # 5 minutes
 
@@ -103,6 +100,10 @@ def update_candle_from_tick(msg):
     if not symbol or ltp is None or vol is None or ts is None:
         return
 
+    # 🔥 CRITICAL FIX — FYERS sends ms sometimes
+    if ts > 10_000_000_000:
+        ts = ts // 1000
+
     start = candle_start(ts)
     c = candles.get(symbol)
 
@@ -126,11 +127,10 @@ def update_candle_from_tick(msg):
     c["cum_vol"] = vol
 
 # ------------------------------------------------------------
-# WebSocket Callbacks (🔥 TICKS SILENT)
+# WS CALLBACKS (TICKS SILENT)
 # ------------------------------------------------------------
 def on_message(message):
-    # ❌ NO TICK PRINT
-    update_candle_from_tick(message)
+    update_candle_from_tick(message)   # ✅ silent ticks
 
 def on_error(message):
     print("❌ WS ERROR:", message)
@@ -157,37 +157,32 @@ def on_connect():
     )
 
 # ------------------------------------------------------------
-# WS THREAD-1 : CONNECT (UNCHANGED)
+# START WS (FLOW LOCKED)
 # ------------------------------------------------------------
 def start_ws():
-    global fyers_ws
-    print("🧵 WS INIT THREAD")
+    try:
+        print("🧵 WS THREAD STARTED")
 
-    fyers_ws = data_ws.FyersDataSocket(
-        access_token=FYERS_ACCESS_TOKEN,
-        on_message=on_message,
-        on_error=on_error,
-        on_close=on_close,
-        on_connect=on_connect,
-        reconnect=True
-    )
+        global fyers_ws
+        fyers_ws = data_ws.FyersDataSocket(
+            access_token=FYERS_ACCESS_TOKEN,
+            on_message=on_message,
+            on_error=on_error,
+            on_close=on_close,
+            on_connect=on_connect,
+            reconnect=True
+        )
 
-    fyers_ws.connect()
-    print("📶 WS CONNECT CALLED")
+        print("📶 WS CONNECTING ...")
+        fyers_ws.connect()
 
-# ------------------------------------------------------------
-# WS THREAD-2 : KEEP RUNNING (MANDATORY)
-# ------------------------------------------------------------
-def keep_ws_alive():
-    time.sleep(2)
-    print("♻️ WS KEEP RUNNING")
-    fyers_ws.keep_running()
+    except Exception as e:
+        print("🔥 WS THREAD CRASHED:", e)
 
 threading.Thread(target=start_ws, daemon=True).start()
-threading.Thread(target=keep_ws_alive, daemon=True).start()
 
 # ------------------------------------------------------------
-# Start Flask (MAIN THREAD)
+# START FLASK
 # ------------------------------------------------------------
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
