@@ -1,7 +1,7 @@
 # ============================================================
 # RajanTradeAutomation – main.py
 # Phase-0 : FYERS LIVE TICK BY TICK (SILENT) + 5 MIN CANDLE
-# WS FLOW LOCKED | ONLY CANDLE LOGS ENABLED
+# WS + FLASK + KEEP_RUNNING (RENDER SAFE)
 # ============================================================
 
 import os
@@ -9,9 +9,6 @@ import time
 import threading
 from flask import Flask, jsonify, request
 
-# ------------------------------------------------------------
-# Basic Logs
-# ------------------------------------------------------------
 print("🚀 main.py STARTED")
 
 # ------------------------------------------------------------
@@ -31,7 +28,7 @@ if not FYERS_CLIENT_ID or not FYERS_ACCESS_TOKEN:
     raise Exception("❌ FYERS ENV variables missing")
 
 # ------------------------------------------------------------
-# Flask App (Ping + Redirects)
+# Flask App (Health + FYERS Redirect)
 # ------------------------------------------------------------
 app = Flask(__name__)
 
@@ -61,14 +58,14 @@ def fyers_redirect():
     })
 
 # ------------------------------------------------------------
-# FYERS WebSocket
+# FYERS WebSocket Import
 # ------------------------------------------------------------
 print("📦 Importing fyers_apiv3 WebSocket")
 from fyers_apiv3.FyersWebsocket import data_ws
 print("✅ data_ws IMPORT SUCCESS")
 
 # ------------------------------------------------------------
-# 🔒 5-MIN CANDLE ENGINE (PROVEN)
+# 🔒 5-MIN CANDLE ENGINE (LOCKED + PROVEN)
 # ------------------------------------------------------------
 CANDLE_INTERVAL = 300  # 5 minutes
 
@@ -131,7 +128,7 @@ def update_candle_from_tick(msg):
 # WebSocket Callbacks
 # ------------------------------------------------------------
 def on_message(message):
-    # 🔕 TICKS SILENT (NO RENDER NOISE)
+    # 🔕 TICKS SILENT (NO PRINT)
     update_candle_from_tick(message)
 
 def on_error(message):
@@ -159,7 +156,7 @@ def on_connect():
     )
 
 # ------------------------------------------------------------
-# Start WebSocket (NON-BLOCKING)
+# Start WebSocket (THREAD + KEEP_RUNNING)
 # ------------------------------------------------------------
 def start_ws():
     try:
@@ -178,6 +175,9 @@ def start_ws():
         print("✅ FyersDataSocket CREATED")
         fyers_ws.connect()
         print("📶 WS CONNECT CALLED")
+
+        # 🔥 CRITICAL: KEEP WS ALIVE
+        fyers_ws.keep_running()
 
     except Exception as e:
         print("🔥 WS THREAD CRASHED:", e)
