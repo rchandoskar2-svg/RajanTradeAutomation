@@ -1,10 +1,10 @@
 # ============================================================
 # RajanTradeAutomation – main.py
-# FINAL STABLE VERSION
-# ✔ FYERS LIVE TICK BY TICK (SILENT)
-# ✔ 5-MIN CANDLE (CUMULATIVE VOLUME BASED)
-# ✔ FYERS REDIRECT URI
-# ✔ RENDER SAFE THREADING
+# FINAL LOCKED VERSION
+# ✔ SILENT TICKS
+# ✔ 5-MIN CANDLE (CUM VOL)
+# ✔ FYERS REDIRECT
+# ✔ RENDER SAFE (KEEP_RUNNING FIXED)
 # ============================================================
 
 import os
@@ -12,9 +12,6 @@ import time
 import threading
 from flask import Flask, jsonify, request
 
-# ------------------------------------------------------------
-# BOOT LOG
-# ------------------------------------------------------------
 print("🚀 main.py STARTED")
 
 # ------------------------------------------------------------
@@ -34,21 +31,15 @@ if not FYERS_CLIENT_ID or not FYERS_ACCESS_TOKEN:
     raise Exception("❌ FYERS ENV variables missing")
 
 # ------------------------------------------------------------
-# FLASK APP (RENDER KEEP ALIVE)
+# FLASK APP
 # ------------------------------------------------------------
 app = Flask(__name__)
 
 @app.route("/")
 def health():
-    return jsonify({
-        "status": "ok",
-        "service": "RajanTradeAutomation"
-    })
+    return jsonify({"status": "ok", "service": "RajanTradeAutomation"})
 
-# ------------------------------------------------------------
-# FYERS REDIRECT URI (MANDATORY)
-# ------------------------------------------------------------
-@app.route("/fyers-redirect", methods=["GET"])
+@app.route("/fyers-redirect")
 def fyers_redirect():
     auth_code = request.args.get("auth_code") or request.args.get("code")
     state = request.args.get("state")
@@ -67,7 +58,7 @@ def fyers_redirect():
     })
 
 # ------------------------------------------------------------
-# FYERS WEBSOCKET IMPORT
+# FYERS WS IMPORT
 # ------------------------------------------------------------
 print("📦 Importing fyers_apiv3 WebSocket")
 from fyers_apiv3.FyersWebsocket import data_ws
@@ -84,28 +75,25 @@ SYMBOLS = [
     "NSE:KOTAKBANK-EQ"
 ]
 
-CANDLE_INTERVAL = 300  # 5 minutes
+CANDLE_INTERVAL = 300  # 5 min
 
-# ------------------------------------------------------------
-# CANDLE STORAGE
-# ------------------------------------------------------------
-candles = {}          # symbol -> running candle
-last_cum_vol = {}     # symbol -> last candle cumulative volume
+candles = {}
+last_cum_vol = {}
 
 def get_candle_start(ts):
     return ts - (ts % CANDLE_INTERVAL)
 
 def close_candle(symbol, c):
-    prev_vol = last_cum_vol.get(symbol, c["cum_vol"])
-    candle_volume = c["cum_vol"] - prev_vol
+    prev = last_cum_vol.get(symbol, c["cum_vol"])
+    vol = c["cum_vol"] - prev
     last_cum_vol[symbol] = c["cum_vol"]
 
     print(
         f"\n🟩 5m CANDLE CLOSED | {symbol}"
         f"\nTime : {time.strftime('%H:%M:%S', time.localtime(c['start']))}"
         f"\nO:{c['open']} H:{c['high']} L:{c['low']} "
-        f"C:{c['close']} V:{candle_volume}"
-        f"\n------------------------------------"
+        f"C:{c['close']} V:{vol}"
+        f"\n-------------------------------"
     )
 
 def update_candle_from_tick(msg):
@@ -120,16 +108,15 @@ def update_candle_from_tick(msg):
     if not symbol or ltp is None or vol is None or ts is None:
         return
 
-    candle_start = get_candle_start(ts)
+    start = get_candle_start(ts)
     c = candles.get(symbol)
 
-    # NEW CANDLE
-    if c is None or c["start"] != candle_start:
+    if c is None or c["start"] != start:
         if c:
             close_candle(symbol, c)
 
         candles[symbol] = {
-            "start": candle_start,
+            "start": start,
             "open": ltp,
             "high": ltp,
             "low": ltp,
@@ -138,20 +125,19 @@ def update_candle_from_tick(msg):
         }
         return
 
-    # UPDATE RUNNING CANDLE
     c["high"] = max(c["high"], ltp)
     c["low"] = min(c["low"], ltp)
     c["close"] = ltp
     c["cum_vol"] = vol
 
 # ------------------------------------------------------------
-# WS CALLBACKS (SILENT TICKS)
+# WS CALLBACKS (SILENT)
 # ------------------------------------------------------------
 def on_message(message):
     try:
         update_candle_from_tick(message)
     except Exception as e:
-        print("🔥 Candle logic error:", e)
+        print("🔥 Candle error:", e)
 
 def on_error(message):
     print("❌ WS ERROR:", message)
@@ -161,40 +147,41 @@ def on_close(message):
 
 def on_connect():
     print("🔗 WS CONNECTED")
-    print("📡 Subscribing symbols:", SYMBOLS)
-
-    fyers_ws.subscribe(
-        symbols=SYMBOLS,
-        data_type="SymbolUpdate"
-    )
+    print("📡 Subscribing:", SYMBOLS)
+    fyers_ws.subscribe(symbols=SYMBOLS, data_type="SymbolUpdate")
 
 # ------------------------------------------------------------
-# WS THREAD
+# WS THREAD-1 : CONNECT
 # ------------------------------------------------------------
 def start_ws():
     global fyers_ws
-    try:
-        print("🧵 WS THREAD STARTED")
+    print("🧵 WS INIT THREAD")
 
-        fyers_ws = data_ws.FyersDataSocket(
-            access_token=FYERS_ACCESS_TOKEN,
-            on_message=on_message,
-            on_error=on_error,
-            on_close=on_close,
-            on_connect=on_connect,
-            reconnect=True
-        )
+    fyers_ws = data_ws.FyersDataSocket(
+        access_token=FYERS_ACCESS_TOKEN,
+        on_message=on_message,
+        on_error=on_error,
+        on_close=on_close,
+        on_connect=on_connect,
+        reconnect=True
+    )
 
-        fyers_ws.connect()
-        print("📶 WS CONNECT CALLED")
-
-    except Exception as e:
-        print("🔥 WS THREAD CRASHED:", e)
-
-threading.Thread(target=start_ws, daemon=True).start()
+    fyers_ws.connect()
+    print("📶 WS CONNECT CALLED")
 
 # ------------------------------------------------------------
-# START FLASK (MAIN THREAD)
+# WS THREAD-2 : KEEP RUNNING (🔥 THIS WAS MISSING)
+# ------------------------------------------------------------
+def keep_ws_alive():
+    time.sleep(2)  # allow connect first
+    print("♻️ WS KEEP RUNNING")
+    fyers_ws.keep_running()
+
+threading.Thread(target=start_ws, daemon=True).start()
+threading.Thread(target=keep_ws_alive, daemon=True).start()
+
+# ------------------------------------------------------------
+# START FLASK
 # ------------------------------------------------------------
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
