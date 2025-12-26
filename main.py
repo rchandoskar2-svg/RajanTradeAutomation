@@ -1,7 +1,7 @@
 # ============================================================
-# RajanTradeAutomation – main.py
-# FYERS LIVE WS (MAIN THREAD) + FLASK (BACKGROUND)
-# SILENT TICKS + 5 MIN CANDLES (PROVEN)
+# RajanTradeAutomation – main.py (FINAL)
+# FYERS LIVE WS (MAIN THREAD) + FLASK (BG)
+# SILENT TICKS + 5 MIN CANDLE (MS→SEC FIXED)
 # ============================================================
 
 import os
@@ -28,7 +28,7 @@ if not FYERS_CLIENT_ID or not FYERS_ACCESS_TOKEN:
     raise Exception("❌ FYERS ENV variables missing")
 
 # ------------------------------------------------------------
-# Flask App
+# Flask App (BACKGROUND)
 # ------------------------------------------------------------
 app = Flask(__name__)
 
@@ -40,16 +40,12 @@ def health():
 def fyers_callback():
     return jsonify({"status": "callback"})
 
-# ------------------------------------------------------------
-# Start Flask in BACKGROUND THREAD
-# ------------------------------------------------------------
 def start_flask():
     port = int(os.environ.get("PORT", 10000))
     print(f"🌐 Starting Flask on port {port}")
     app.run(host="0.0.0.0", port=port)
 
-flask_thread = threading.Thread(target=start_flask)
-flask_thread.start()
+threading.Thread(target=start_flask, daemon=True).start()
 
 # ------------------------------------------------------------
 # FYERS WebSocket
@@ -58,9 +54,9 @@ from fyers_apiv3.FyersWebsocket import data_ws
 print("✅ data_ws IMPORT SUCCESS")
 
 # ------------------------------------------------------------
-# 5 MIN CANDLE ENGINE
+# 5-MIN CANDLE ENGINE
 # ------------------------------------------------------------
-CANDLE_INTERVAL = 300
+CANDLE_INTERVAL = 300  # seconds
 
 candles = {}
 last_candle_vol = {}
@@ -93,9 +89,14 @@ def update_candle(msg):
     if not symbol or ltp is None or vol is None or ts is None:
         return
 
+    # 🔥 CRITICAL FIX: milliseconds → seconds
+    if ts > 10_000_000_000:
+        ts = ts // 1000
+
     start = candle_start(ts)
     c = candles.get(symbol)
 
+    # NEW CANDLE
     if c is None or c["start"] != start:
         if c:
             close_candle(symbol, c)
@@ -110,6 +111,7 @@ def update_candle(msg):
         }
         return
 
+    # UPDATE RUNNING CANDLE
     c["high"] = max(c["high"], ltp)
     c["low"] = min(c["low"], ltp)
     c["close"] = ltp
@@ -119,7 +121,7 @@ def update_candle(msg):
 # WS CALLBACKS
 # ------------------------------------------------------------
 def on_message(msg):
-    update_candle(msg)   # silent ticks
+    update_candle(msg)   # 🔕 silent ticks
 
 def on_error(msg):
     print("❌ WS ERROR:", msg)
