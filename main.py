@@ -84,11 +84,15 @@ def close_candle(symbol, c):
     last_candle_vol[symbol] = c["cum_vol"]
 
     print(
-        f"\n🟩 5m CANDLE CLOSED | {symbol}"
-        f"\nTime : {time.strftime('%H:%M:%S', time.localtime(c['start']))}"
-        f"\nO:{c['open']} H:{c['high']} L:{c['low']} "
+        f"
+🟩 5m CANDLE CLOSED | {symbol}"
+        f"
+Time : {time.strftime('%H:%M:%S', time.localtime(c['start']))}"
+        f"
+O:{c['open']} H:{c['high']} L:{c['low']} "
         f"C:{c['close']} V:{candle_vol}"
-        f"\n-------------------------------"
+        f"
+-------------------------------"
     )
 
 def update_candle_from_tick(msg):
@@ -131,8 +135,8 @@ def update_candle_from_tick(msg):
 # WebSocket Callbacks (TICKS SILENCED ✅)
 # ------------------------------------------------------------
 def on_message(message):
-    # 🔇 Tick logs disabled intentionally
-    update_candle_from_tick(message)
+    # print("📩 WS MESSAGE:", message)  # 🔇 SILENCED - NO TICK NOISE ON RENDER
+    update_candle_from_tick(message)   # ✅ Candle logic continues silently
 
 def on_error(message):
     print("❌ WS ERROR:", message)
@@ -182,7 +186,8 @@ def start_ws():
     except Exception as e:
         print("🔥 WS THREAD CRASHED:", e)
 
-threading.Thread(target=start_ws, daemon=True).start()
+ws_thread = threading.Thread(target=start_ws, daemon=True)
+ws_thread.start()
 
 # ------------------------------------------------------------
 # Start Flask (MAIN THREAD)
