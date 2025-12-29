@@ -1,7 +1,7 @@
 # ============================================================
 # RajanTradeAutomation – main.py
-# Phase-0 : FYERS LIVE TICK BY TICK + 5 MIN CANDLE (TICKS SILENCED)
-# WS FLOW LOCKED | TICK PRINTS DISABLED | CANDLES ACTIVE
+# Phase-0 : FYERS LIVE TICK BY TICK + 5 MIN CANDLE
+# TICKS SILENT | ROBUST CANDLE ENGINE | RENDER SAFE
 # ============================================================
 
 import os
@@ -9,9 +9,6 @@ import time
 import threading
 from flask import Flask, jsonify, request
 
-# ------------------------------------------------------------
-# Basic Logs
-# ------------------------------------------------------------
 print("🚀 main.py STARTED")
 
 # ------------------------------------------------------------
@@ -31,7 +28,7 @@ if not FYERS_CLIENT_ID or not FYERS_ACCESS_TOKEN:
     raise Exception("❌ FYERS ENV variables missing")
 
 # ------------------------------------------------------------
-# Flask App (Ping + Redirects)
+# Flask App
 # ------------------------------------------------------------
 app = Flask(__name__)
 
@@ -63,36 +60,30 @@ def fyers_redirect():
 # ------------------------------------------------------------
 # FYERS WebSocket
 # ------------------------------------------------------------
-print("📦 Importing fyers_apiv3 WebSocket")
 from fyers_apiv3.FyersWebsocket import data_ws
-print("✅ data_ws IMPORT SUCCESS")
 
 # ------------------------------------------------------------
-# 🔒 5-MIN CANDLE ENGINE (LOCAL, PROVEN)
+# 5-MIN CANDLE ENGINE (ROBUST)
 # ------------------------------------------------------------
-CANDLE_INTERVAL = 300  # 5 minutes
+CANDLE_INTERVAL = 300  # seconds
 
 candles = {}          # symbol -> running candle
-last_candle_vol = {}  # symbol -> last candle cumulative volume
+last_candle_vol = {}  # symbol -> last cumulative volume
 
 def candle_start(ts):
     return ts - (ts % CANDLE_INTERVAL)
 
 def close_candle(symbol, c):
     prev_vol = last_candle_vol.get(symbol, c["cum_vol"])
-    candle_vol = c["cum_vol"] - prev_vol
+    candle_vol = max(0, c["cum_vol"] - prev_vol)
     last_candle_vol[symbol] = c["cum_vol"]
 
     print(
-        f"
-🟩 5m CANDLE CLOSED | {symbol}"
-        f"
-Time : {time.strftime('%H:%M:%S', time.localtime(c['start']))}"
-        f"
-O:{c['open']} H:{c['high']} L:{c['low']} "
+        f"\n🟩 5m CANDLE CLOSED | {symbol}"
+        f"\nTime : {time.strftime('%H:%M:%S', time.localtime(c['start']))}"
+        f"\nO:{c['open']} H:{c['high']} L:{c['low']} "
         f"C:{c['close']} V:{candle_vol}"
-        f"
--------------------------------"
+        f"\n-------------------------------"
     )
 
 def update_candle_from_tick(msg):
@@ -100,17 +91,26 @@ def update_candle_from_tick(msg):
         return
 
     symbol = msg.get("symbol")
-    ltp = msg.get("ltp")
-    vol = msg.get("vol_traded_today")
-    ts = msg.get("exch_feed_time")
-
-    if not symbol or ltp is None or vol is None or ts is None:
+    if not symbol:
         return
+
+    # -------- PRICE --------
+    ltp = msg.get("ltp")
+    if ltp is None:
+        return   # NSE stocks always require ltp
+
+    # -------- TIME --------
+    ts = msg.get("exch_feed_time") or msg.get("last_traded_time")
+    if ts is None:
+        return
+
+    # -------- VOLUME --------
+    vol = msg.get("vol_traded_today", 0)
 
     start = candle_start(ts)
     c = candles.get(symbol)
 
-    # NEW CANDLE
+    # -------- NEW CANDLE --------
     if c is None or c["start"] != start:
         if c:
             close_candle(symbol, c)
@@ -125,18 +125,17 @@ def update_candle_from_tick(msg):
         }
         return
 
-    # UPDATE RUNNING CANDLE
+    # -------- UPDATE RUNNING --------
     c["high"] = max(c["high"], ltp)
     c["low"] = min(c["low"], ltp)
     c["close"] = ltp
     c["cum_vol"] = vol
 
 # ------------------------------------------------------------
-# WebSocket Callbacks (TICKS SILENCED ✅)
+# WebSocket Callbacks (TICKS SILENT)
 # ------------------------------------------------------------
 def on_message(message):
-    # print("📩 WS MESSAGE:", message)  # 🔇 SILENCED - NO TICK NOISE ON RENDER
-    update_candle_from_tick(message)   # ✅ Candle logic continues silently
+    update_candle_from_tick(message)
 
 def on_error(message):
     print("❌ WS ERROR:", message)
@@ -166,31 +165,21 @@ def on_connect():
 # Start WebSocket (NON-BLOCKING)
 # ------------------------------------------------------------
 def start_ws():
-    try:
-        print("🧵 WS THREAD STARTED")
+    global fyers_ws
+    fyers_ws = data_ws.FyersDataSocket(
+        access_token=FYERS_ACCESS_TOKEN,
+        on_message=on_message,
+        on_error=on_error,
+        on_close=on_close,
+        on_connect=on_connect,
+        reconnect=True
+    )
+    fyers_ws.connect()
 
-        global fyers_ws
-        fyers_ws = data_ws.FyersDataSocket(
-            access_token=FYERS_ACCESS_TOKEN,
-            on_message=on_message,
-            on_error=on_error,
-            on_close=on_close,
-            on_connect=on_connect,
-            reconnect=True
-        )
-
-        print("✅ FyersDataSocket CREATED")
-        fyers_ws.connect()
-        print("📶 WS CONNECT CALLED")
-
-    except Exception as e:
-        print("🔥 WS THREAD CRASHED:", e)
-
-ws_thread = threading.Thread(target=start_ws, daemon=True)
-ws_thread.start()
+threading.Thread(target=start_ws, daemon=True).start()
 
 # ------------------------------------------------------------
-# Start Flask (MAIN THREAD)
+# Start Flask
 # ------------------------------------------------------------
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
