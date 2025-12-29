@@ -1,7 +1,7 @@
 # ============================================================
 # RajanTradeAutomation – main.py
 # Phase-0 : FYERS LIVE TICK BY TICK + 5 MIN CANDLE
-# WS FLOW LOCKED | ONLY SYMBOLS ADDED
+# WS FLOW LOCKED | ONLY CANDLE LOGIC ADDED
 # ============================================================
 
 import os
@@ -132,7 +132,7 @@ def update_candle_from_tick(msg):
 # ------------------------------------------------------------
 def on_message(message):
     print("📩 WS MESSAGE:", message)
-    update_candle_from_tick(message)
+    update_candle_from_tick(message)   # ✅ ONLY ADDITION
 
 def on_error(message):
     print("❌ WS ERROR:", message)
@@ -144,52 +144,14 @@ def on_connect():
     print("🔗 WS CONNECTED")
 
     symbols = [
-        "NSE:UNOMINDA-EQ","NSE:TMPV-EQ","NSE:ASHOKLEY-EQ","NSE:BAJAJ-AUTO-EQ",
-        "NSE:MARUTI-EQ","NSE:EICHERMOT-EQ","NSE:TVSMOTOR-EQ","NSE:BHARATFORG-EQ",
-        "NSE:EXIDEIND-EQ","NSE:BOSCHLTD-EQ","NSE:M&M-EQ","NSE:MOTHERSON-EQ",
-        "NSE:SONACOMS-EQ","NSE:HEROMOTOCO-EQ","NSE:TIINDIA-EQ",
-
-        "NSE:SHRIRAMFIN-EQ","NSE:BSE-EQ","NSE:PFC-EQ","NSE:RECLTD-EQ",
-        "NSE:ICICIBANK-EQ","NSE:JIOFIN-EQ","NSE:BAJAJFINSV-EQ","NSE:LICHSGFIN-EQ",
-        "NSE:AXISBANK-EQ","NSE:HDFCBANK-EQ","NSE:ICICIPRULI-EQ","NSE:SBICARD-EQ",
-        "NSE:MUTHOOTFIN-EQ","NSE:BAJFINANCE-EQ","NSE:ICICIGI-EQ","NSE:SBILIFE-EQ",
-        "NSE:KOTAKBANK-EQ","NSE:SBIN-EQ","NSE:HDFCLIFE-EQ","NSE:CHOLAFIN-EQ",
-
-        "NSE:VBL-EQ","NSE:RADICO-EQ","NSE:UNITDSPR-EQ","NSE:UBL-EQ",
-        "NSE:NESTLEIND-EQ","NSE:EMAMILTD-EQ","NSE:ITC-EQ","NSE:HINDUNILVR-EQ",
-        "NSE:DABUR-EQ","NSE:GODREJCP-EQ","NSE:COLPAL-EQ","NSE:BRITANNIA-EQ",
-        "NSE:MARICO-EQ","NSE:TATACONSUM-EQ","NSE:PATANJALI-EQ",
-
-        "NSE:PERSISTENT-EQ","NSE:WIPRO-EQ","NSE:INFY-EQ","NSE:TECHM-EQ",
-        "NSE:HCLTECH-EQ","NSE:TCS-EQ","NSE:COFORGE-EQ","NSE:OFSS-EQ",
-        "NSE:LTIM-EQ","NSE:MPHASIS-EQ",
-
-        "NSE:SUNTV-EQ","NSE:ZEEL-EQ","NSE:NETWORK18-EQ","NSE:HATHWAY-EQ",
-        "NSE:PFOCUS-EQ","NSE:NAZARA-EQ","NSE:DBCORP-EQ","NSE:SAREGAMA-EQ",
-        "NSE:TIPSMUSIC-EQ","NSE:PVRINOX-EQ",
-
-        "NSE:NATIONALUM-EQ","NSE:LLOYDSME-EQ","NSE:HINDCOPPER-EQ","NSE:WELCORP-EQ",
-        "NSE:SAIL-EQ","NSE:NMDC-EQ","NSE:HINDZINC-EQ","NSE:APLAPOLLO-EQ",
-        "NSE:JSWSTEEL-EQ","NSE:HINDALCO-EQ","NSE:ADANIENT-EQ","NSE:JINDALSTEL-EQ",
-        "NSE:VEDL-EQ","NSE:TATASTEEL-EQ","NSE:JSL-EQ",
-
-        "NSE:PPLPHARMA-EQ","NSE:WOCKPHARMA-EQ","NSE:AJANTPHARM-EQ",
-        "NSE:GLENMARK-EQ","NSE:LAURUSLABS-EQ","NSE:SUNPHARMA-EQ","NSE:ALKEM-EQ",
-        "NSE:GLAND-EQ","NSE:MANKIND-EQ","NSE:IPCALAB-EQ","NSE:DIVISLAB-EQ",
-        "NSE:DRREDDY-EQ","NSE:LUPIN-EQ","NSE:TORNTPHARM-EQ","NSE:BIOCON-EQ",
-        "NSE:JBCHEPHARM-EQ","NSE:AUROPHARMA-EQ","NSE:ZYDUSLIFE-EQ",
-        "NSE:ABBOTINDIA-EQ","NSE:CIPLA-EQ",
-
-        "NSE:ANANTRAJ-EQ","NSE:SOBHA-EQ","NSE:PHOENIXLTD-EQ","NSE:BRIGADE-EQ",
-        "NSE:LODHA-EQ","NSE:DLF-EQ","NSE:OBEROIRLTY-EQ","NSE:SIGNATURE-EQ",
-        "NSE:GODREJPROP-EQ","NSE:PRESTIGE-EQ",
-
-        "NSE:GSPL-EQ","NSE:BPCL-EQ","NSE:GAIL-EQ","NSE:HINDPETRO-EQ",
-        "NSE:MGL-EQ","NSE:PETRONET-EQ","NSE:CASTROLIND-EQ","NSE:RELIANCE-EQ",
-        "NSE:ONGC-EQ","NSE:IGL-EQ","NSE:IOC-EQ","NSE:GUJGASLTD-EQ","NSE:OIL-EQ"
+        "NSE:SBIN-EQ",
+        "NSE:RELIANCE-EQ",
+        "NSE:VEDL-EQ",
+        "NSE:AXISBANK-EQ",
+        "NSE:KOTAKBANK-EQ"
     ]
 
-    print("📡 Subscribing symbols:", len(symbols))
+    print("📡 Subscribing symbols:", symbols)
 
     fyers_ws.subscribe(
         symbols=symbols,
