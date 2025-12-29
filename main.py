@@ -1,7 +1,7 @@
 # ============================================================
 # RajanTradeAutomation – main.py
-# Phase-0 : FYERS LIVE TICK BY TICK + 5 MIN CANDLE
-# WS FLOW LOCKED | ONLY CANDLE LOGIC ADDED
+# Phase-0 : FYERS LIVE TICK BY TICK + 5 MIN CANDLE (TICKS SILENCED)
+# WS FLOW LOCKED | TICK PRINTS DISABLED | CANDLES ACTIVE
 # ============================================================
 
 import os
@@ -128,11 +128,11 @@ def update_candle_from_tick(msg):
     c["cum_vol"] = vol
 
 # ------------------------------------------------------------
-# WebSocket Callbacks (WS FLOW UNCHANGED)
+# WebSocket Callbacks (TICKS SILENCED ✅)
 # ------------------------------------------------------------
 def on_message(message):
-    print("📩 WS MESSAGE:", message)
-    update_candle_from_tick(message)   # ✅ ONLY ADDITION
+    # 🔇 Tick logs disabled intentionally
+    update_candle_from_tick(message)
 
 def on_error(message):
     print("❌ WS ERROR:", message)
@@ -159,7 +159,7 @@ def on_connect():
     )
 
 # ------------------------------------------------------------
-# Start WebSocket (NON-BLOCKING) – 🔒 UNCHANGED
+# Start WebSocket (NON-BLOCKING)
 # ------------------------------------------------------------
 def start_ws():
     try:
@@ -182,8 +182,7 @@ def start_ws():
     except Exception as e:
         print("🔥 WS THREAD CRASHED:", e)
 
-ws_thread = threading.Thread(target=start_ws, daemon=True)
-ws_thread.start()
+threading.Thread(target=start_ws, daemon=True).start()
 
 # ------------------------------------------------------------
 # Start Flask (MAIN THREAD)
